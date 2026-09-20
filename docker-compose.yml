@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: aetherqore
+      POSTGRES_PASSWORD: aetherqore
+      POSTGRES_DB: aetherqore
+    ports:
+      - "5432:5432"
+    volumes:
+      - aetherqore_pg:/var/lib/postgresql/data
+
+volumes:
+  aetherqore_pg:

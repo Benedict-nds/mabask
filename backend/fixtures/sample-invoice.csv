@@ -1,0 +1,6 @@
+name,quantity,unit_cost,batch,expiry
+Amoxicillin 500mg,500,0.18,AMX-2240,2027-04-01
+Paracetamol 500mg,1200,0.05,PCM-9925,2027-08-15
+Azithromycin 250mg,300,0.50,AZM-6655,2027-02-20
+Metformin 850mg,400,0.14,MET-1195,2027-05-10
+Salbutamol Inhaler,80,2.60,SAL-7728,2027-01-05

@@ -1,16 +1,43 @@
-from datetime import date
+from datetime import date, datetime, time, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from io import StringIO
+import csv
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.modules.audit.service import record_audit
-from app.core.responses import ConflictError, NotFoundError, ValidationAppError
-from app.models import Batch, Customer, MovementType, PaymentMethod, Product, Sale, SaleItem, User
-from app.core.schemas import SaleCreate, SaleItemOut, SaleOut
+from app.core.responses import NotFoundError, ValidationAppError
+from app.models import (
+    Batch,
+    Customer,
+    MovementType,
+    PaymentMethod,
+    Product,
+    Return,
+    ReturnItem,
+    Sale,
+    SaleCorrectionRequest,
+    SaleItem,
+    SaleStatus,
+    StockMovement,
+    User,
+    CorrectionStatus,
+)
+from app.core.schemas import (
+    SaleCorrectionLinkOut,
+    SaleCreate,
+    SaleItemOut,
+    SaleMovementOut,
+    SaleOut,
+    SaleReturnItemOut,
+    SaleReturnSummaryOut,
+)
 from app.modules.sales.customers import get_or_create_walkin
 from app.modules.sales.numbering import next_sale_number
 from app.modules.settings.service import get_tax_rate
 from app.modules.inventory.stock import apply_stock_change
+from app.modules.inventory.traceability import resolve_batch_provenance
 
 TWOPLACES = Decimal("0.01")
 
@@ -19,15 +46,190 @@ def money(value: Decimal) -> Decimal:
     return value.quantize(TWOPLACES, rounding=ROUND_HALF_UP)
 
 
-def to_sale_out(sale: Sale) -> SaleOut:
+def _day_start(value: date) -> datetime:
+    return datetime.combine(value, time.min, tzinfo=timezone.utc)
+
+
+def _day_end(value: date) -> datetime:
+    return datetime.combine(value, time.max, tzinfo=timezone.utc)
+
+
+def _link_out(row: SaleCorrectionRequest, *, original: Sale | None, corrected: Sale | None) -> SaleCorrectionLinkOut:
+    ret = row.return_record
+    refund = ret.refund_amount if ret else None
+    financial_difference = None
+    if refund is not None and corrected is not None:
+        financial_difference = money(Decimal(corrected.total) - Decimal(refund))
+    return SaleCorrectionLinkOut(
+        request_id=row.id,
+        reference=f"CR-{row.id.replace('-', '')[:8].upper()}",
+        status=row.status.value,
+        corrected_sale_id=row.corrected_sale_id,
+        corrected_sale_number=corrected.sale_number if corrected else None,
+        original_sale_id=row.sale_id,
+        original_sale_number=original.sale_number if original else None,
+        financial_difference=financial_difference,
+        return_id=row.return_id,
+        return_number=ret.return_number if ret else None,
+        refund_amount=refund,
+        reason=row.reason,
+        requested_by_name=row.requester.full_name if row.requester else None,
+        requested_at=row.created_at,
+        reviewed_by_name=row.reviewer.full_name if row.reviewer else None,
+        reviewed_at=row.reviewed_at,
+        review_note=row.review_note or "",
+    )
+
+
+def _correction_links_bulk(
+    db: Session, sales: list[Sale]
+) -> dict[str, tuple[SaleCorrectionLinkOut | None, SaleCorrectionLinkOut | None]]:
+    """Correction linkage for many sales in two queries (latest request per original sale)."""
+    ids = [s.id for s in sales]
+    if not ids:
+        return {}
+    by_id = {s.id: s for s in sales}
+    options = (
+        joinedload(SaleCorrectionRequest.sale),
+        joinedload(SaleCorrectionRequest.corrected_sale),
+        joinedload(SaleCorrectionRequest.return_record),
+        joinedload(SaleCorrectionRequest.requester),
+        joinedload(SaleCorrectionRequest.reviewer),
+    )
+    as_original: dict[str, SaleCorrectionLinkOut] = {}
+    for row in (
+        db.query(SaleCorrectionRequest)
+        .options(*options)
+        .filter(SaleCorrectionRequest.sale_id.in_(ids))
+        .order_by(SaleCorrectionRequest.created_at.desc())
+        .all()
+    ):
+        if row.sale_id in as_original:
+            continue
+        as_original[row.sale_id] = _link_out(row, original=by_id[row.sale_id], corrected=row.corrected_sale)
+    as_corrected: dict[str, SaleCorrectionLinkOut] = {}
+    for row in (
+        db.query(SaleCorrectionRequest)
+        .options(*options)
+        .filter(SaleCorrectionRequest.corrected_sale_id.in_(ids))
+        .all()
+    ):
+        as_corrected[row.corrected_sale_id] = _link_out(row, original=row.sale, corrected=by_id[row.corrected_sale_id])
+    return {sid: (as_original.get(sid), as_corrected.get(sid)) for sid in ids}
+
+
+def _correction_links(db: Session, sale: Sale) -> tuple[SaleCorrectionLinkOut | None, SaleCorrectionLinkOut | None]:
+    return _correction_links_bulk(db, [sale])[sale.id]
+
+
+def _sale_returns(db: Session, sale_id: str) -> list[SaleReturnSummaryOut]:
+    rows = (
+        db.query(Return)
+        .options(
+            joinedload(Return.items).joinedload(ReturnItem.product),
+            joinedload(Return.cashier),
+        )
+        .filter(Return.sale_id == sale_id)
+        .order_by(Return.created_at.desc())
+        .all()
+    )
+    return [
+        SaleReturnSummaryOut(
+            id=r.id,
+            return_number=r.return_number,
+            reason=r.reason,
+            refund_amount=r.refund_amount,
+            restock=r.restock,
+            created_at=r.created_at,
+            processed_by_name=r.cashier.full_name if r.cashier else None,
+            items=[
+                SaleReturnItemOut(
+                    product_id=i.product_id,
+                    product_name=i.product.name if i.product else None,
+                    quantity=i.quantity,
+                    unit_price=i.unit_price,
+                )
+                for i in r.items
+            ],
+        )
+        for r in rows
+    ]
+
+
+def _sale_movements(db: Session, sale: Sale, returns: list[SaleReturnSummaryOut]) -> list[SaleMovementOut]:
+    ref_ids = [sale.id] + [r.id for r in returns]
+    if not ref_ids:
+        return []
+    rows = (
+        db.query(StockMovement)
+        .options(joinedload(StockMovement.product), joinedload(StockMovement.batch))
+        .filter(
+            or_(
+                (StockMovement.reference_type == "sale") & (StockMovement.reference_id == sale.id),
+                (StockMovement.reference_type == "return") & (StockMovement.reference_id.in_([r.id for r in returns])),
+            )
+        )
+        .order_by(StockMovement.created_at.asc())
+        .all()
+    )
+    return [
+        SaleMovementOut(
+            id=m.id,
+            product_id=m.product_id,
+            product_name=m.product.name if m.product else None,
+            batch_id=m.batch_id,
+            batch_number=m.batch.batch_number if m.batch else None,
+            quantity=m.quantity,
+            movement_type=m.movement_type.value,
+            reference_type=m.reference_type,
+            reference_id=m.reference_id,
+            reason=m.reason,
+            created_at=m.created_at,
+        )
+        for m in rows
+    ]
+
+
+def sales_to_out(db: Session, sales: list[Sale]) -> list[SaleOut]:
+    """List serialization with batch provenance and correction links resolved in bulk (no N+1)."""
+    batch_ids = [item.batch_id for sale in sales for item in sale.items if item.batch_id]
+    provenance = resolve_batch_provenance(db, batch_ids)
+    links = _correction_links_bulk(db, sales)
+    return [to_sale_out(sale, db, provenance=provenance, links=links.get(sale.id, (None, None))) for sale in sales]
+
+
+def to_sale_out(
+    sale: Sale,
+    db: Session | None = None,
+    *,
+    detail: bool = False,
+    provenance: dict | None = None,
+    links: tuple[SaleCorrectionLinkOut | None, SaleCorrectionLinkOut | None] | None = None,
+) -> SaleOut:
+    if provenance is None:
+        provenance = {}
+        if db is not None:
+            batch_ids = [item.batch_id for item in sale.items if item.batch_id]
+            provenance = resolve_batch_provenance(db, batch_ids)
+
     items = []
     for item in sale.items:
+        prov = provenance.get(item.batch_id) if item.batch_id else None
         items.append(
             SaleItemOut(
                 id=item.id,
                 product_id=item.product_id,
                 product_name=item.product.name if item.product else None,
+                product_sku=item.product.sku if item.product else None,
                 barcode=item.product.barcode if item.product else None,
+                batch_id=item.batch_id,
+                batch_number=item.batch.batch_number if item.batch else None,
+                batch_expiry=item.batch.expiry_date if item.batch else None,
+                batch_cost_price=item.batch.cost_price if item.batch else None,
+                batch_supplier_id=prov.supplier_id if prov else None,
+                batch_supplier_name=prov.supplier_name if prov else None,
+                batch_po_id=prov.purchase_order_id if prov else None,
+                batch_po_number=prov.po_number if prov else None,
                 quantity=item.quantity,
                 quantity_returned=item.quantity_returned,
                 unit_price=item.unit_price,
@@ -35,6 +237,18 @@ def to_sale_out(sale: Sale) -> SaleOut:
                 returnable=item.quantity - item.quantity_returned,
             )
         )
+    correction = None
+    is_correction_of = None
+    returns: list[SaleReturnSummaryOut] = []
+    movements: list[SaleMovementOut] = []
+    if links is not None:
+        correction, is_correction_of = links
+    elif db is not None:
+        correction, is_correction_of = _correction_links(db, sale)
+    if db is not None:
+        if detail:
+            returns = _sale_returns(db, sale.id)
+            movements = _sale_movements(db, sale, returns)
     return SaleOut(
         id=sale.id,
         sale_number=sale.sale_number,
@@ -54,6 +268,10 @@ def to_sale_out(sale: Sale) -> SaleOut:
         change_due=sale.change_due,
         created_at=sale.created_at,
         items=items,
+        correction=correction,
+        is_correction_of=is_correction_of,
+        returns=returns,
+        stock_movements=movements,
     )
 
 
@@ -62,6 +280,7 @@ def _load(db: Session, sale_id: str) -> Sale:
         db.query(Sale)
         .options(
             joinedload(Sale.items).joinedload(SaleItem.product),
+            joinedload(Sale.items).joinedload(SaleItem.batch),
             joinedload(Sale.customer),
             joinedload(Sale.cashier),
         )
@@ -73,21 +292,259 @@ def _load(db: Session, sale_id: str) -> Sale:
     return sale
 
 
-def list_sales(db: Session, limit: int = 50, offset: int = 0, q: str | None = None) -> tuple[list[Sale], int]:
+def _sales_query(
+    db: Session,
+    *,
+    q: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    cashier_id: str | None = None,
+    payment_method: str | None = None,
+    status: str | None = None,
+    product_id: str | None = None,
+    correction: str | None = None,
+):
     query = db.query(Sale).options(
         joinedload(Sale.items).joinedload(SaleItem.product),
+        joinedload(Sale.items).joinedload(SaleItem.batch),
         joinedload(Sale.customer),
         joinedload(Sale.cashier),
     )
+    if date_from:
+        query = query.filter(Sale.created_at >= _day_start(date_from))
+    if date_to:
+        query = query.filter(Sale.created_at <= _day_end(date_to))
+    if cashier_id:
+        query = query.filter(Sale.cashier_id == cashier_id)
+    if payment_method:
+        try:
+            query = query.filter(Sale.payment_method == PaymentMethod(payment_method))
+        except ValueError as exc:
+            raise ValidationAppError("Invalid payment method") from exc
+    if status:
+        try:
+            query = query.filter(Sale.status == SaleStatus(status))
+        except ValueError as exc:
+            raise ValidationAppError("Invalid sale status") from exc
+    if product_id:
+        query = query.filter(Sale.items.any(SaleItem.product_id == product_id))
     if q:
-        query = query.filter(Sale.sale_number.ilike(f"%{q}%"))
+        term = f"%{q.strip()}%"
+        query = query.filter(
+            or_(
+                Sale.sale_number.ilike(term),
+                Sale.items.any(SaleItem.product.has(Product.name.ilike(term))),
+                Sale.items.any(SaleItem.product.has(Product.sku.ilike(term))),
+            )
+        )
+    if correction:
+        key = correction.strip().lower()
+        if key == "normal":
+            query = query.filter(
+                ~Sale.id.in_(db.query(SaleCorrectionRequest.sale_id)),
+                ~Sale.id.in_(
+                    db.query(SaleCorrectionRequest.corrected_sale_id).filter(
+                        SaleCorrectionRequest.corrected_sale_id.isnot(None)
+                    )
+                ),
+            )
+        elif key == "corrected":
+            query = query.filter(
+                Sale.id.in_(
+                    db.query(SaleCorrectionRequest.sale_id).filter(
+                        SaleCorrectionRequest.status == CorrectionStatus.APPROVED
+                    )
+                )
+            )
+        elif key in {"correction_sale", "correction-related", "correction_related"}:
+            if key == "correction_sale":
+                query = query.filter(
+                    Sale.id.in_(
+                        db.query(SaleCorrectionRequest.corrected_sale_id).filter(
+                            SaleCorrectionRequest.corrected_sale_id.isnot(None)
+                        )
+                    )
+                )
+            else:
+                query = query.filter(
+                    or_(
+                        Sale.id.in_(db.query(SaleCorrectionRequest.sale_id)),
+                        Sale.id.in_(
+                            db.query(SaleCorrectionRequest.corrected_sale_id).filter(
+                                SaleCorrectionRequest.corrected_sale_id.isnot(None)
+                            )
+                        ),
+                    )
+                )
+        elif key in {"pending", "rejected"}:
+            wanted = CorrectionStatus.PENDING if key == "pending" else CorrectionStatus.REJECTED
+            query = query.filter(
+                Sale.id.in_(db.query(SaleCorrectionRequest.sale_id).filter(SaleCorrectionRequest.status == wanted))
+            )
+        elif key == "refunded":
+            query = query.filter(Sale.status.in_([SaleStatus.REFUNDED, SaleStatus.PARTIALLY_REFUNDED]))
+        elif key not in {"all", ""}:
+            raise ValidationAppError("Invalid correction filter")
+    return query
+
+
+def list_sales(
+    db: Session,
+    limit: int = 50,
+    offset: int = 0,
+    q: str | None = None,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    cashier_id: str | None = None,
+    payment_method: str | None = None,
+    status: str | None = None,
+    product_id: str | None = None,
+    correction: str | None = None,
+) -> tuple[list[Sale], int]:
+    query = _sales_query(
+        db,
+        q=q,
+        date_from=date_from,
+        date_to=date_to,
+        cashier_id=cashier_id,
+        payment_method=payment_method,
+        status=status,
+        product_id=product_id,
+        correction=correction,
+    )
     total = query.count()
     rows = query.order_by(Sale.created_at.desc()).offset(offset).limit(limit).all()
     return rows, total
 
 
+def list_sale_cashiers(db: Session) -> list[dict[str, str]]:
+    rows = (
+        db.query(User.id, User.full_name)
+        .join(Sale, Sale.cashier_id == User.id)
+        .distinct()
+        .order_by(User.full_name.asc())
+        .all()
+    )
+    return [{"id": r[0], "full_name": r[1]} for r in rows]
+
+
+def export_sales_csv(
+    db: Session,
+    *,
+    q: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    cashier_id: str | None = None,
+    payment_method: str | None = None,
+    status: str | None = None,
+    product_id: str | None = None,
+    correction: str | None = None,
+    limit: int = 5000,
+) -> str:
+    query = _sales_query(
+        db,
+        q=q,
+        date_from=date_from,
+        date_to=date_to,
+        cashier_id=cashier_id,
+        payment_method=payment_method,
+        status=status,
+        product_id=product_id,
+        correction=correction,
+    )
+    rows = query.order_by(Sale.created_at.desc()).limit(limit).all()
+    outs = sales_to_out(db, rows)
+    buf = StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        [
+            "date_time",
+            "sale_number",
+            "cashier",
+            "status",
+            "payment_method",
+            "product",
+            "sku",
+            "quantity",
+            "unit_price",
+            "discount_percent",
+            "line_total",
+            "batch",
+            "expiry",
+            "batch_cost",
+            "batch_supplier",
+            "batch_po_number",
+            "correction_status",
+            "related_sale_number",
+            "financial_difference",
+        ]
+    )
+    for out in outs:
+        corr_status = None
+        related = None
+        financial_difference = None
+        if out.correction:
+            corr_status = out.correction.status
+            related = out.correction.corrected_sale_number
+            financial_difference = out.correction.financial_difference
+        elif out.is_correction_of:
+            corr_status = "CORRECTION_SALE"
+            related = out.is_correction_of.original_sale_number
+            financial_difference = out.is_correction_of.financial_difference
+        for item in out.items:
+            writer.writerow(
+                [
+                    out.created_at.isoformat(),
+                    out.sale_number,
+                    out.cashier_name or "",
+                    out.status,
+                    out.payment_method,
+                    item.product_name or "",
+                    item.product_sku or "",
+                    item.quantity,
+                    str(item.unit_price),
+                    str(out.discount_percent),
+                    str(item.line_total),
+                    item.batch_number or "",
+                    item.batch_expiry.isoformat() if item.batch_expiry else "",
+                    str(item.batch_cost_price) if item.batch_cost_price is not None else "",
+                    item.batch_supplier_name or "",
+                    item.batch_po_number or "",
+                    corr_status or "",
+                    related or "",
+                    str(financial_difference) if financial_difference is not None else "",
+                ]
+            )
+        if not out.items:
+            writer.writerow(
+                [
+                    out.created_at.isoformat(),
+                    out.sale_number,
+                    out.cashier_name or "",
+                    out.status,
+                    out.payment_method,
+                    "",
+                    "",
+                    "",
+                    "",
+                    str(out.discount_percent),
+                    str(out.total),
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    corr_status or "",
+                    related or "",
+                    str(financial_difference) if financial_difference is not None else "",
+                ]
+            )
+    return buf.getvalue()
+
+
 def get_sale(db: Session, sale_id: str) -> SaleOut:
-    return to_sale_out(_load(db, sale_id))
+    return to_sale_out(_load(db, sale_id), db, detail=True)
 
 
 def _fefo_batches(db: Session, product: Product, needed: int) -> list[tuple[Batch, int]]:
@@ -119,10 +576,10 @@ def _fefo_batches(db: Session, product: Product, needed: int) -> list[tuple[Batc
     return allocated
 
 
-def complete_sale(db: Session, data: SaleCreate, actor: User) -> SaleOut:
+def complete_sale(db: Session, data: SaleCreate, actor: User, *, commit: bool = True) -> SaleOut:
     existing = db.query(Sale).filter(Sale.idempotency_key == data.idempotency_key).first()
     if existing:
-        return to_sale_out(_load(db, existing.id))
+        return to_sale_out(_load(db, existing.id), db)
     if not data.items:
         raise ValidationAppError("Cart is empty")
     if data.discount_percent < 0 or data.discount_percent > 100:
@@ -134,7 +591,6 @@ def complete_sale(db: Session, data: SaleCreate, actor: User) -> SaleOut:
     except ValueError as exc:
         raise ValidationAppError("Invalid payment method") from exc
 
-    # collapse duplicate product lines
     qty_by_product: dict[str, int] = {}
     for line in data.items:
         qty_by_product[line.product_id] = qty_by_product.get(line.product_id, 0) + line.quantity
@@ -225,15 +681,18 @@ def complete_sale(db: Session, data: SaleCreate, actor: User) -> SaleOut:
         entity_id=sale.id,
         details={"sale_number": sale.sale_number, "total": str(total)},
     )
+    if not commit:
+        db.flush()
+        return to_sale_out(_load(db, sale.id), db)
     try:
         db.commit()
     except Exception:
         db.rollback()
         replay = db.query(Sale).filter(Sale.idempotency_key == data.idempotency_key).first()
         if replay:
-            return to_sale_out(_load(db, replay.id))
+            return to_sale_out(_load(db, replay.id), db)
         raise
-    return to_sale_out(_load(db, sale.id))
+    return to_sale_out(_load(db, sale.id), db)
 
 
 def customer_sales(db: Session, customer_id: str) -> list[SaleOut]:
@@ -241,9 +700,14 @@ def customer_sales(db: Session, customer_id: str) -> list[SaleOut]:
         raise NotFoundError("Customer not found")
     rows = (
         db.query(Sale)
-        .options(joinedload(Sale.items).joinedload(SaleItem.product), joinedload(Sale.customer), joinedload(Sale.cashier))
+        .options(
+            joinedload(Sale.items).joinedload(SaleItem.product),
+            joinedload(Sale.items).joinedload(SaleItem.batch),
+            joinedload(Sale.customer),
+            joinedload(Sale.cashier),
+        )
         .filter(Sale.customer_id == customer_id)
         .order_by(Sale.created_at.desc())
         .all()
     )
-    return [to_sale_out(s) for s in rows]
+    return sales_to_out(db, rows)

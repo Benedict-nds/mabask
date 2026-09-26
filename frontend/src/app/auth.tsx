@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation"
 import { ApiError, authApi } from "@/lib/api/client"
 import { clearTokens, getAccessToken, setTokens } from "@/lib/api/auth/token"
 import type { User } from "@/lib/api/types"
+import { homeFor } from "@/app/permissions"
 
 type AuthState = {
   user: User | null
@@ -56,7 +57,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const res = await authApi.login(email, password)
           setTokens(res.tokens.access_token, res.tokens.refresh_token)
           setUser(res.user)
-          router.push(res.user.role === "cashier" ? "/pos" : "/dashboard")
+          router.push(homeFor(res.user))
         } catch (err) {
           const message = err instanceof ApiError ? err.message : "Unable to sign in"
           setError(message)

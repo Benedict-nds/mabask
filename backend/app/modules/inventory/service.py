@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
@@ -7,8 +7,19 @@ from app.modules.audit.service import record_audit
 from app.core.dates import parse_expiry
 from app.core.responses import ConflictError, NotFoundError, ValidationAppError
 from app.models import Batch, MovementType, Product, StockMovement, Supplier, User
-from app.core.schemas import BatchCreate, ProductCreate, ProductOut, ProductUpdate, StockAdjustIn
+from app.core.schemas import (
+    BatchCreate,
+    BatchOut,
+    BatchPurchaseOrderOut,
+    BatchSupplierOut,
+    MovementOut,
+    ProductCreate,
+    ProductOut,
+    ProductUpdate,
+    StockAdjustIn,
+)
 from app.modules.inventory.stock import apply_stock_change
+from app.modules.inventory.traceability import BatchProvenance, resolve_batch_provenance, resolve_purchase_refs
 
 
 def stock_status(qty: int, reorder: int) -> str:
@@ -19,13 +30,43 @@ def stock_status(qty: int, reorder: int) -> str:
     return "healthy"
 
 
-def to_product_out(product: Product) -> ProductOut:
+def _batch_out(batch: Batch, provenance: BatchProvenance | None = None) -> BatchOut:
+    prov = provenance or BatchProvenance()
+    supplier = None
+    if prov.supplier_id and prov.supplier_name:
+        supplier = BatchSupplierOut(id=prov.supplier_id, name=prov.supplier_name)
+    purchase_order = None
+    if prov.purchase_order_id:
+        purchase_order = BatchPurchaseOrderOut(
+            id=prov.purchase_order_id,
+            po_number=prov.po_number or "",
+        )
+    return BatchOut(
+        id=batch.id,
+        batch_number=batch.batch_number,
+        expiry_date=batch.expiry_date,
+        quantity=batch.quantity,
+        cost_price=batch.cost_price,
+        supplier=supplier,
+        purchase_order=purchase_order,
+        received_at=prov.received_at,
+    )
+
+
+def to_product_out(
+    product: Product,
+    db: Session | None = None,
+    provenance: dict[str, BatchProvenance] | None = None,
+) -> ProductOut:
     active_batches = [b for b in product.batches if b.is_active]
     nearest = min(active_batches, key=lambda b: b.expiry_date) if active_batches else None
+    if provenance is None and db is not None and active_batches:
+        provenance = resolve_batch_provenance(db, [b.id for b in active_batches])
+    provenance = provenance or {}
     return ProductOut(
         id=product.id,
-        sku=product.sku,
-        barcode=product.barcode,
+        sku=product.sku or "",
+        barcode=product.barcode or "",
         name=product.name,
         generic_name=product.generic_name,
         brand=product.brand,
@@ -41,20 +82,59 @@ def to_product_out(product: Product) -> ProductOut:
         supplier_id=product.supplier_id,
         supplier_name=product.supplier.name if product.supplier else None,
         is_active=product.is_active,
+        deleted_at=product.deleted_at,
         status=stock_status(product.quantity_on_hand, product.reorder_threshold),
         nearest_expiry=nearest.expiry_date if nearest else None,
         nearest_batch=nearest.batch_number if nearest else None,
-        batches=active_batches,
+        batches=[_batch_out(b, provenance.get(b.id)) for b in active_batches],
     )
 
 
-def _get(db: Session, product_id: str) -> Product:
-    product = (
+def products_to_out(db: Session, products: list[Product]) -> list[ProductOut]:
+    """Build ProductOut list with a single batch-provenance query (avoids N+1)."""
+    batch_ids = [b.id for p in products for b in p.batches if b.is_active]
+    provenance = resolve_batch_provenance(db, batch_ids)
+    return [to_product_out(p, provenance=provenance) for p in products]
+
+
+def movements_to_out(db: Session, rows: list[StockMovement]) -> list[MovementOut]:
+    po_ids = [m.reference_id for m in rows if m.reference_type == "purchase_order" and m.reference_id]
+    refs = resolve_purchase_refs(db, po_ids)
+    items: list[MovementOut] = []
+    for m in rows:
+        ref = refs.get(m.reference_id) if m.reference_type == "purchase_order" else None
+        items.append(
+            MovementOut(
+                id=m.id,
+                product_id=m.product_id,
+                product_name=m.product.name if m.product else None,
+                batch_id=m.batch_id,
+                quantity=m.quantity,
+                previous_quantity=m.previous_quantity,
+                resulting_quantity=m.resulting_quantity,
+                movement_type=m.movement_type.value,
+                reference_type=m.reference_type,
+                reference_id=m.reference_id,
+                reason=m.reason,
+                created_at=m.created_at,
+                user_id=m.user_id,
+                po_number=ref.po_number if ref else None,
+                supplier_id=ref.supplier_id if ref else None,
+                supplier_name=ref.supplier_name if ref else None,
+            )
+        )
+    return items
+
+
+def _get(db: Session, product_id: str, *, include_archived: bool = False) -> Product:
+    query = (
         db.query(Product)
         .options(joinedload(Product.supplier), joinedload(Product.batches))
-        .filter(Product.id == product_id, Product.deleted_at.is_(None))
-        .first()
+        .filter(Product.id == product_id)
     )
+    if not include_archived:
+        query = query.filter(Product.deleted_at.is_(None))
+    product = query.first()
     if product is None:
         raise NotFoundError("Product not found")
     return product
@@ -68,14 +148,17 @@ def list_products(
     status: str | None = None,
     supplier_id: str | None = None,
     barcode: str | None = None,
+    archived: bool = False,
     limit: int = 50,
     offset: int = 0,
     sort: str = "name",
     order: str = "asc",
 ) -> tuple[list[Product], int]:
-    query = db.query(Product).options(joinedload(Product.supplier), joinedload(Product.batches)).filter(
-        Product.deleted_at.is_(None)
-    )
+    query = db.query(Product).options(joinedload(Product.supplier), joinedload(Product.batches))
+    if archived:
+        query = query.filter(Product.deleted_at.is_not(None))
+    else:
+        query = query.filter(Product.deleted_at.is_(None))
     if q:
         like = f"%{q}%"
         query = query.filter(
@@ -95,7 +178,7 @@ def list_products(
         query = query.filter(Product.barcode == barcode)
 
     products = query.all()
-    if status and status != "All":
+    if status and status != "All" and not archived:
         products = [p for p in products if stock_status(p.quantity_on_hand, p.reorder_threshold) == status]
 
     reverse = order == "desc"
@@ -103,6 +186,8 @@ def list_products(
         products.sort(key=lambda p: p.quantity_on_hand, reverse=reverse)
     elif sort == "expiry":
         products.sort(key=lambda p: (p.batches[0].expiry_date.isoformat() if p.batches else "9999"), reverse=reverse)
+    elif sort == "archived" and archived:
+        products.sort(key=lambda p: p.deleted_at or datetime.min.replace(tzinfo=timezone.utc), reverse=reverse)
     else:
         products.sort(key=lambda p: p.name.lower(), reverse=reverse)
 
@@ -122,21 +207,43 @@ def get_by_barcode(db: Session, code: str) -> Product:
     return product
 
 
+def optional_code(value: str | None) -> str | None:
+    """SKU/barcode are optional: blank means NULL so unique constraints only bind real codes."""
+    cleaned = (value or "").strip()
+    return cleaned or None
+
+
+def category_or_default(value: str | None) -> str:
+    return (value or "").strip() or "General"
+
+
+def ensure_codes_available(db: Session, sku: str | None, barcode: str | None, exclude_id: str | None = None) -> None:
+    for column, value, label in ((Product.sku, sku, "SKU"), (Product.barcode, barcode, "Barcode")):
+        if value is None:
+            continue
+        query = db.query(Product.id).filter(column == value)
+        if exclude_id:
+            query = query.filter(Product.id != exclude_id)
+        if query.first():
+            raise ConflictError(f"{label} already exists")
+
+
 def create_product(db: Session, data: ProductCreate, actor: User) -> ProductOut:
-    if db.query(Product).filter(Product.sku == data.sku, Product.deleted_at.is_(None)).first():
-        raise ConflictError("SKU already exists")
-    if db.query(Product).filter(Product.barcode == data.barcode, Product.deleted_at.is_(None)).first():
-        raise ConflictError("Barcode already exists")
+    if not data.name.strip():
+        raise ValidationAppError("Medicine name is required")
+    sku = optional_code(data.sku)
+    barcode = optional_code(data.barcode)
+    ensure_codes_available(db, sku, barcode)
     if data.supplier_id and db.get(Supplier, data.supplier_id) is None:
         raise ValidationAppError("Unknown supplier")
 
     product = Product(
-        sku=data.sku,
-        barcode=data.barcode,
-        name=data.name,
+        sku=sku,
+        barcode=barcode,
+        name=data.name.strip(),
         generic_name=data.generic_name,
         brand=data.brand,
-        category=data.category,
+        category=category_or_default(data.category),
         description=data.description,
         dosage_form=data.dosage_form,
         strength=data.strength,
@@ -175,30 +282,90 @@ def create_product(db: Session, data: ProductCreate, actor: User) -> ProductOut:
             reason="Initial stock",
         )
 
-    record_audit(db, user=actor, action="PRODUCT_CREATED", entity_type="product", entity_id=product.id, details={"sku": product.sku})
+    record_audit(
+        db,
+        user=actor,
+        action="PRODUCT_CREATED",
+        entity_type="product",
+        entity_id=product.id,
+        details={"sku": product.sku, "name": product.name},
+    )
     db.commit()
-    return to_product_out(_get(db, product.id))
+    return to_product_out(_get(db, product.id), db)
+
+
+_REQUIRED_ON_UPDATE = ("name", "cost_price", "selling_price", "reorder_threshold", "generic_name", "brand", "description", "dosage_form", "strength", "unit", "is_active")
 
 
 def update_product(db: Session, product_id: str, data: ProductUpdate, actor: User) -> ProductOut:
     product = _get(db, product_id)
     payload = data.model_dump(exclude_unset=True)
-    if "sku" in payload and payload["sku"] != product.sku:
-        if db.query(Product).filter(Product.sku == payload["sku"], Product.id != product.id, Product.deleted_at.is_(None)).first():
-            raise ConflictError("SKU already exists")
-    if "barcode" in payload and payload["barcode"] != product.barcode:
-        if db.query(Product).filter(Product.barcode == payload["barcode"], Product.id != product.id, Product.deleted_at.is_(None)).first():
-            raise ConflictError("Barcode already exists")
+    for key in _REQUIRED_ON_UPDATE:
+        if key in payload and payload[key] is None:
+            payload.pop(key)
+    if "name" in payload:
+        payload["name"] = payload["name"].strip()
+        if not payload["name"]:
+            raise ValidationAppError("Medicine name is required")
+    if "sku" in payload:
+        payload["sku"] = optional_code(payload["sku"])
+    if "barcode" in payload:
+        payload["barcode"] = optional_code(payload["barcode"])
+    if "category" in payload:
+        payload["category"] = category_or_default(payload["category"])
+    ensure_codes_available(
+        db,
+        payload.get("sku") if payload.get("sku") != product.sku else None,
+        payload.get("barcode") if payload.get("barcode") != product.barcode else None,
+        exclude_id=product.id,
+    )
     for key, value in payload.items():
         setattr(product, key, value)
     action = "PRODUCT_DEACTIVATED" if payload.get("is_active") is False else "PRODUCT_UPDATED"
     record_audit(db, user=actor, action=action, entity_type="product", entity_id=product.id)
     db.commit()
-    return to_product_out(_get(db, product.id))
+    return to_product_out(_get(db, product.id), db)
 
 
 def deactivate_product(db: Session, product_id: str, actor: User) -> ProductOut:
+    """Legacy soft-deactivate via is_active=False. Does not archive (deleted_at stays null)."""
     return update_product(db, product_id, ProductUpdate(is_active=False), actor)
+
+
+def archive_product(db: Session, product_id: str, actor: User) -> ProductOut:
+    """Soft-archive: set deleted_at. Preserves is_active, stock, batches, and history."""
+    product = _get(db, product_id, include_archived=True)
+    if product.deleted_at is not None:
+        raise ConflictError("Product is already archived")
+    product.deleted_at = datetime.now(timezone.utc)
+    record_audit(
+        db,
+        user=actor,
+        action="PRODUCT_ARCHIVED",
+        entity_type="product",
+        entity_id=product.id,
+        details={"sku": product.sku, "name": product.name},
+    )
+    db.commit()
+    return to_product_out(_get(db, product.id, include_archived=True), db)
+
+
+def restore_product(db: Session, product_id: str, actor: User) -> ProductOut:
+    """Restore archived product to the catalog. Does not create stock or alter history."""
+    product = _get(db, product_id, include_archived=True)
+    if product.deleted_at is None:
+        raise ConflictError("Product is not archived")
+    product.deleted_at = None
+    record_audit(
+        db,
+        user=actor,
+        action="PRODUCT_RESTORED",
+        entity_type="product",
+        entity_id=product.id,
+        details={"sku": product.sku, "name": product.name, "is_active": product.is_active},
+    )
+    db.commit()
+    return to_product_out(_get(db, product.id), db)
 
 
 def add_batch(db: Session, product_id: str, data: BatchCreate, actor: User) -> ProductOut:
@@ -247,7 +414,7 @@ def add_batch(db: Session, product_id: str, data: BatchCreate, actor: User) -> P
         details={"product_id": product.id, "batch_number": batch.batch_number, "quantity": data.quantity},
     )
     db.commit()
-    return to_product_out(_get(db, product.id))
+    return to_product_out(_get(db, product.id), db)
 
 
 def adjust_stock(db: Session, product_id: str, data: StockAdjustIn, actor: User) -> ProductOut:
@@ -301,7 +468,7 @@ def adjust_stock(db: Session, product_id: str, data: StockAdjustIn, actor: User)
         details={"delta": data.quantity_delta, "reason": data.reason, "type": movement_type.value},
     )
     db.commit()
-    return to_product_out(_get(db, product.id))
+    return to_product_out(_get(db, product.id), db)
 
 
 def list_movements(db: Session, product_id: str | None, limit: int, offset: int) -> tuple[list[StockMovement], int]:

@@ -11,7 +11,7 @@ from app.modules.sales.service import money
 from app.modules.inventory.stock import apply_stock_change
 
 
-def process_return(db: Session, data: ReturnCreate, actor: User) -> ReturnOut:
+def _build_return(db: Session, data: ReturnCreate, actor: User) -> Return:
     if db.query(Sale).filter(Sale.id == data.sale_id).with_for_update().first() is None:
         raise NotFoundError("Sale not found")
     sale = (
@@ -44,7 +44,6 @@ def process_return(db: Session, data: ReturnCreate, actor: User) -> ReturnOut:
         prepared.append((item, line.quantity))
         refund += Decimal(item.unit_price) * line.quantity
 
-    # apply discount/tax proportionally to the original sale
     if sale.subtotal > 0:
         share = refund / sale.subtotal
         refund = money(refund - (sale.discount_amount * share) + (sale.tax_amount * share))
@@ -107,8 +106,16 @@ def process_return(db: Session, data: ReturnCreate, actor: User) -> ReturnOut:
         entity_id=record.id,
         details={"sale_id": sale.id, "amount": str(refund)},
     )
-    db.commit()
-    db.refresh(record)
+    return record
+
+
+def process_return(db: Session, data: ReturnCreate, actor: User, *, commit: bool = True) -> ReturnOut:
+    record = _build_return(db, data, actor)
+    if commit:
+        db.commit()
+        db.refresh(record)
+    else:
+        db.flush()
     return ReturnOut(
         id=record.id,
         return_number=record.return_number,

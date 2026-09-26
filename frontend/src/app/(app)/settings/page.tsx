@@ -46,6 +46,7 @@ export default function SettingsPage() {
           email: fd.get("email"),
           address: fd.get("address"),
           tax_rate: fd.get("tax_rate"),
+          default_markup_percent: String(fd.get("default_markup_percent") || "").trim() || null,
         }),
       })
       setSettings(next)
@@ -87,6 +88,22 @@ export default function SettingsPage() {
                     <input name={name} defaultValue={value} className="h-10 rounded-lg border border-input bg-card px-3 text-sm outline-none" />
                   </label>
                 ))}
+                <label className="flex flex-col gap-1.5 text-sm">
+                  Default selling-price markup (%)
+                  <input
+                    name="default_markup_percent"
+                    type="number"
+                    min={0}
+                    max={1000}
+                    step="any"
+                    placeholder="Not set"
+                    defaultValue={settings.default_markup_percent == null ? "" : String(Number(settings.default_markup_percent))}
+                    className="h-10 rounded-lg border border-input bg-card px-3 text-sm outline-none"
+                  />
+                  <span className="text-xs text-muted-foreground">
+                    Pre-fills the markup when receiving an invoice. Selling price = cost × (1 + markup ÷ 100). It can be changed for each import.
+                  </span>
+                </label>
                 {message && <p className="text-sm text-primary">{message}</p>}
                 <Button type="submit">Save changes</Button>
               </form>
@@ -110,6 +127,9 @@ export default function SettingsPage() {
                         <p className="truncate text-sm font-medium">{m.full_name}</p>
                         <p className="truncate text-sm text-muted-foreground">{m.email}</p>
                       </div>
+                      {Object.keys(m.permission_overrides ?? {}).length > 0 && (
+                        <Badge variant="warning">{Object.keys(m.permission_overrides ?? {}).length} custom</Badge>
+                      )}
                       <Badge variant={m.role === "admin" ? "default" : "neutral"}>{m.role}</Badge>
                     </div>
                   ))}

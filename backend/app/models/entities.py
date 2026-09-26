@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import (
@@ -45,6 +45,7 @@ class SupplierStatus(str, enum.Enum):
 class POStatus(str, enum.Enum):
     DRAFT = "DRAFT"
     SUBMITTED = "SUBMITTED"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
     APPROVED = "APPROVED"
     PARTIALLY_RECEIVED = "PARTIALLY_RECEIVED"
     RECEIVED = "RECEIVED"
@@ -72,6 +73,12 @@ class SaleStatus(str, enum.Enum):
     COMPLETED = "COMPLETED"
     PARTIALLY_REFUNDED = "PARTIALLY_REFUNDED"
     REFUNDED = "REFUNDED"
+
+
+class CorrectionStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
 
 
 class TimestampMixin:
@@ -126,6 +133,35 @@ class User(TimestampMixin, Base):
 
     role: Mapped[Role] = relationship(back_populates="users")
     refresh_tokens: Mapped[list[RefreshToken]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    permission_overrides: Mapped[list[UserPermissionOverride]] = relationship(
+        foreign_keys="UserPermissionOverride.user_id",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+
+class PermissionEffect(str, enum.Enum):
+    ALLOW = "ALLOW"
+    DENY = "DENY"
+
+
+class UserPermissionOverride(TimestampMixin, Base):
+    """Per-user exception to the role baseline. No row means INHERIT."""
+
+    __tablename__ = "user_permission_overrides"
+    __table_args__ = (
+        UniqueConstraint("user_id", "permission_code", name="uq_user_permission_override"),
+        CheckConstraint("effect IN ('ALLOW', 'DENY')", name="ck_user_permission_override_effect"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    permission_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    effect: Mapped[str] = mapped_column(String(8), nullable=False)
+    updated_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    user: Mapped[User] = relationship(foreign_keys=[user_id], back_populates="permission_overrides")
 
 
 class RefreshToken(Base):
@@ -174,8 +210,9 @@ class Product(TimestampMixin, Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    sku: Mapped[str] = mapped_column(String(40), nullable=False)
-    barcode: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Optional: supplier invoices carry neither. NULL (never "") keeps the unique constraints usable.
+    sku: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     generic_name: Mapped[str] = mapped_column(String(200), default="")
     brand: Mapped[str] = mapped_column(String(120), default="")
@@ -246,6 +283,9 @@ class PurchaseOrder(TimestampMixin, Base):
     supplier_id: Mapped[str] = mapped_column(ForeignKey("suppliers.id"), nullable=False)
     status: Mapped[POStatus] = mapped_column(Enum(POStatus), default=POStatus.DRAFT, nullable=False)
     notes: Mapped[str] = mapped_column(Text, default="")
+    review_comment: Mapped[str] = mapped_column(Text, default="")
+    review_requested_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    review_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     subtotal: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
     total: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
@@ -259,6 +299,7 @@ class PurchaseOrder(TimestampMixin, Base):
     items: Mapped[list[PurchaseOrderItem]] = relationship(back_populates="purchase_order", cascade="all, delete-orphan")
     creator: Mapped[User] = relationship(foreign_keys=[created_by])
     approver: Mapped[User | None] = relationship(foreign_keys=[approved_by])
+    reviewer: Mapped[User | None] = relationship(foreign_keys=[review_requested_by])
 
 
 class PurchaseOrderItem(Base):
@@ -375,6 +416,33 @@ class ReturnItem(Base):
     product: Mapped[Product] = relationship()
 
 
+class SaleCorrectionRequest(TimestampMixin, Base):
+    """Admin-reviewed correction for a wrong sale. Original sale is never edited in place."""
+
+    __tablename__ = "sale_correction_requests"
+    __table_args__ = (Index("ix_sale_corrections_status_created", "status", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    sale_id: Mapped[str] = mapped_column(ForeignKey("sales.id"), nullable=False, index=True)
+    requested_by: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[CorrectionStatus] = mapped_column(
+        Enum(CorrectionStatus), default=CorrectionStatus.PENDING, nullable=False
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    return_id: Mapped[str | None] = mapped_column(ForeignKey("returns.id"), nullable=True)
+    corrected_sale_id: Mapped[str | None] = mapped_column(ForeignKey("sales.id"), nullable=True)
+    approval_idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+
+    sale: Mapped[Sale] = relationship(foreign_keys=[sale_id])
+    requester: Mapped[User] = relationship(foreign_keys=[requested_by])
+    reviewer: Mapped[User | None] = relationship(foreign_keys=[reviewed_by])
+    return_record: Mapped[Return | None] = relationship(foreign_keys=[return_id])
+    corrected_sale: Mapped[Sale | None] = relationship(foreign_keys=[corrected_sale_id])
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     __table_args__ = (Index("ix_audit_created", "created_at"), Index("ix_audit_entity", "entity_type", "entity_id"))
@@ -385,7 +453,13 @@ class AuditLog(Base):
     entity_type: Mapped[str] = mapped_column(String(40), nullable=False)
     entity_id: Mapped[str] = mapped_column(String(36), default="")
     details: Mapped[str] = mapped_column(Text, default="{}")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # Python-side default keeps sub-second ordering on SQLite, whose now() only has second resolution.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+        nullable=False,
+    )
 
     user: Mapped[User | None] = relationship()
 

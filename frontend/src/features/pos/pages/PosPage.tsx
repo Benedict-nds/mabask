@@ -1,14 +1,14 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
-import { Search, ScanLine, Plus, Minus, Trash2, User, Banknote, Smartphone, CreditCard, Receipt, CheckCircle2, RotateCcw } from "lucide-react"
+import { useEffect, useState } from "react"
+import { Search, ScanLine, Plus, Minus, Trash2, User, Banknote, Smartphone, CreditCard, Receipt, CheckCircle2, RotateCcw, FileWarning, ClipboardList } from "lucide-react"
 import { AppTopbar } from "@/components/app-topbar"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { Button, ButtonLink } from "@/components/ui/button"
 import { Overlay } from "@/components/ui/dismissable"
 import { api, ApiError } from "@/lib/api/client"
 import { asMedicine, type Medicine } from "@/lib/api/map"
-import type { Page, Product, Sale, Settings } from "@/lib/api/types"
+import type { Page, Product, Sale, SaleCorrection, Settings } from "@/lib/api/types"
 import { currency } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/lib/auth-context"
@@ -35,7 +35,6 @@ export default function POSPage() {
   const [lookup, setLookup] = useState("")
   const [refundSale, setRefundSale] = useState<Sale | null>(null)
   const [settings, setSettings] = useState<Settings | null>(null)
-
   useEffect(() => {
     try {
       const raw = localStorage.getItem(CART_KEY)
@@ -203,10 +202,19 @@ export default function POSPage() {
               </button>
             ))}
           </div>
-          {can("sales.refund") && (
-            <div className="mt-4 flex gap-2 rounded-xl border border-border bg-card p-3">
-              <input value={lookup} onChange={(e) => setLookup(e.target.value)} placeholder="Find sale number to refund…" className="h-9 flex-1 rounded-lg border border-border px-3 text-sm outline-none" />
-              <Button variant="outline" className="gap-1.5" onClick={findSale}><RotateCcw className="size-4" /> Refund</Button>
+          {(can("sales.refund") || can("sales.correction_request") || can("sales.correction_approve")) && (
+            <div className="mt-4 space-y-2 rounded-xl border border-border bg-card p-3">
+              {(can("sales.refund") || can("sales.correction_request")) && (
+                <div className="flex gap-2">
+                  <input value={lookup} onChange={(e) => setLookup(e.target.value)} placeholder="Find sale number…" className="h-9 flex-1 rounded-lg border border-border px-3 text-sm outline-none" />
+                  <Button variant="outline" className="gap-1.5" onClick={findSale}><RotateCcw className="size-4" /> Look up</Button>
+                </div>
+              )}
+              {can("sales.correction_approve") && (
+                <ButtonLink href="/corrections" variant="outline" className="w-full gap-1.5">
+                  <ClipboardList className="size-4" /> Review sale corrections
+                </ButtonLink>
+              )}
             </div>
           )}
         </div>
@@ -310,51 +318,153 @@ export default function POSPage() {
           </div>
         </div>
       </div>
-      {refundSale && <RefundDialog sale={refundSale} onClose={() => setRefundSale(null)} />}
+      {refundSale && (
+        <SaleActionsDialog
+          sale={refundSale}
+          canRefund={can("sales.refund")}
+          canRequestCorrection={can("sales.correction_request")}
+          onClose={() => setRefundSale(null)}
+        />
+      )}
     </>
   )
 }
 
-function RefundDialog({ sale, onClose }: { sale: Sale; onClose: () => void }) {
+function SaleActionsDialog({
+  sale,
+  canRefund,
+  canRequestCorrection,
+  onClose,
+}: {
+  sale: Sale
+  canRefund: boolean
+  canRequestCorrection: boolean
+  onClose: () => void
+}) {
+  const [tab, setTab] = useState<"refund" | "correct">(canRefund ? "refund" : "correct")
   const [qty, setQty] = useState<Record<string, number>>({})
-  const [reason, setReason] = useState("Customer return")
+  const [reason, setReason] = useState(canRefund ? "Customer return" : "")
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const submit = async () => {
+  const pendingCorrection = sale.correction?.status === "PENDING"
+
+  const submitRefund = async () => {
     const items = sale.items.filter((i) => (qty[i.id] || 0) > 0).map((i) => ({ sale_item_id: i.id, quantity: qty[i.id] }))
     if (!items.length) {
       setError("Enter a return quantity")
       return
     }
     setBusy(true)
+    setError(null)
     try {
-      const result = await api<{ return_number: string; refund_amount: number }>("/returns", { method: "POST", body: JSON.stringify({ sale_id: sale.id, reason, restock: true, items }) })
+      const result = await api<{ return_number: string; refund_amount: number }>("/returns", {
+        method: "POST",
+        body: JSON.stringify({ sale_id: sale.id, reason, restock: true, items }),
+      })
       setDone(`${result.return_number} refunded ${currency(Number(result.refund_amount))}`)
+      notifyInventoryChanged()
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Return failed")
     } finally {
       setBusy(false)
     }
   }
+
+  const submitCorrection = async () => {
+    if (!reason.trim()) {
+      setError("A correction reason is required")
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await api<SaleCorrection>(`/sales/${sale.id}/correction-requests`, {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      })
+      setDone(`Correction request submitted · status ${result.status}`)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not request correction")
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <Overlay onClose={onClose}>
-      <div className="w-full max-w-lg space-y-3 rounded-2xl border border-border bg-card p-6" onClick={(e) => e.stopPropagation()}>
-        <h2 className="text-lg font-semibold">Refund {sale.sale_number}</h2>
-        {sale.items.map((i) => (
-          <div key={i.id} className="flex items-center justify-between text-sm">
-            <span>{i.product_name} · returnable {i.returnable}</span>
-            <input type="number" min={0} max={i.returnable} value={qty[i.id] ?? 0} onChange={(e) => setQty((q) => ({ ...q, [i.id]: Number(e.target.value) }))} className="h-8 w-16 rounded border border-border px-2" />
-          </div>
-        ))}
-        <input value={reason} onChange={(e) => setReason(e.target.value)} className="h-9 w-full rounded-lg border border-border px-3 text-sm" />
-        {error && <p className="text-sm text-destructive">{error}</p>}
-        {done && <p className="text-sm text-primary">{done}</p>}
-        <div className="flex justify-end gap-2">
-          <Button variant="ghost" onClick={onClose}>{done ? "Close" : "Cancel"}</Button>
-          <Button onClick={submit} disabled={busy || !!done}>{busy ? "Processing…" : "Process refund"}</Button>
+      <div className="w-full max-w-md space-y-3 rounded-2xl border border-border bg-card p-6" onClick={(e) => e.stopPropagation()}>
+        <div>
+          <h2 className="text-lg font-semibold">{sale.sale_number}</h2>
+          <p className="text-sm text-muted-foreground">
+            {currency(Number(sale.total))} · {sale.status} · {new Date(sale.created_at).toLocaleString()}
+            {sale.cashier_name ? ` · ${sale.cashier_name}` : ""}
+          </p>
+          {sale.correction && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Correction: {sale.correction.status}
+              {sale.correction.corrected_sale_number ? ` → ${sale.correction.corrected_sale_number}` : ""}
+            </p>
+          )}
         </div>
+        {canRefund && canRequestCorrection && !done && (
+          <div className="flex gap-2">
+            <Button type="button" size="sm" variant={tab === "refund" ? "default" : "outline"} onClick={() => { setTab("refund"); setReason("Customer return"); setError(null) }}>Refund</Button>
+            <Button type="button" size="sm" variant={tab === "correct" ? "default" : "outline"} onClick={() => { setTab("correct"); setReason(""); setError(null) }}>Request correction</Button>
+          </div>
+        )}
+        {done ? (
+          <p className="text-sm text-primary">{done}</p>
+        ) : tab === "refund" && canRefund ? (
+          <>
+            {sale.items.map((item) => (
+              <div key={item.id} className="flex items-center justify-between gap-3 text-sm">
+                <div>
+                  <p className="font-medium">{item.product_name}</p>
+                  <p className="text-xs text-muted-foreground">Returnable {item.returnable}{item.batch_number ? ` · batch ${item.batch_number}` : ""}</p>
+                </div>
+                <input type="number" min={0} max={item.returnable} value={qty[item.id] ?? 0} onChange={(e) => setQty((c) => ({ ...c, [item.id]: Number(e.target.value) }))} className="h-9 w-20 rounded-lg border border-border px-2 text-sm" />
+              </div>
+            ))}
+            <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Return reason" className="h-10 w-full rounded-lg border border-border px-3 text-sm" />
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="ghost" onClick={onClose}>Close</Button>
+              <Button type="button" disabled={busy} onClick={submitRefund}>{busy ? "Refunding…" : "Refund"}</Button>
+            </div>
+          </>
+        ) : canRequestCorrection ? (
+          <>
+            <p className="text-sm text-muted-foreground">
+              Request an admin correction when the wrong medicine or quantity was recorded. The original sale stays on file.
+            </p>
+            {pendingCorrection ? (
+              <p className="rounded-xl border border-warning/40 bg-warning/10 px-3 py-2 text-sm">A correction request is already pending for this sale.</p>
+            ) : (
+              <textarea
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                rows={3}
+                placeholder="e.g. Wrong medicine entered during checkout"
+                className="w-full rounded-lg border border-border px-3 py-2 text-sm outline-none"
+              />
+            )}
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="ghost" onClick={onClose}>Close</Button>
+              <Button type="button" disabled={busy || pendingCorrection || sale.status === "REFUNDED"} onClick={submitCorrection} className="gap-1.5">
+                <FileWarning className="size-4" /> {busy ? "Submitting…" : "Request correction"}
+              </Button>
+            </div>
+          </>
+        ) : null}
+        {done && (
+          <div className="flex justify-end">
+            <Button type="button" onClick={onClose}>Close</Button>
+          </div>
+        )}
       </div>
     </Overlay>
   )
 }
+

@@ -7,6 +7,7 @@ import { Boxes, Mail, Lock, ArrowRight, ShieldCheck, Sparkles, Eye, EyeOff, Sun,
 import { Button } from "@/components/ui/button"
 import { useAuth } from "@/lib/auth-context"
 import { useTheme } from "@/app/theme"
+import { homeFor } from "@/app/permissions"
 import { ApiError } from "@/lib/api/client"
 
 export default function LoginPage() {
@@ -20,7 +21,7 @@ export default function LoginPage() {
   const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
-    if (!loading && user) router.replace(user.role === "cashier" ? "/pos" : "/dashboard")
+    if (!loading && user) router.replace(homeFor(user))
   }, [loading, user, router])
 
   if (!loading && user) return null

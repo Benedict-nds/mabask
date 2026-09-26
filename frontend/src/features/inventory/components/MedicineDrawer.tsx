@@ -9,6 +9,8 @@ import {
   Pencil,
   ShoppingCart,
   CalendarClock,
+  Archive,
+  ArchiveRestore,
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -36,6 +38,11 @@ type Movement = {
   movement_type: string
   reason: string
   created_at: string
+  reference_type?: string
+  reference_id?: string
+  po_number?: string | null
+  supplier_id?: string | null
+  supplier_name?: string | null
 }
 
 export function MedicineDrawer({
@@ -43,11 +50,13 @@ export function MedicineDrawer({
   onClose,
   onChanged,
   alternatives = [],
+  catalogMode = "active",
 }: {
   medicine: Medicine | null
   onClose: () => void
   onChanged?: () => void
   alternatives?: Medicine[]
+  catalogMode?: "active" | "archived"
 }) {
   const router = useRouter()
   const { can } = useAuth()
@@ -56,6 +65,7 @@ export function MedicineDrawer({
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState(false)
+  const isArchived = catalogMode === "archived" || Boolean(product?.deleted_at ?? medicine?.raw.deleted_at)
 
   useEffect(() => {
     if (!medicine) {
@@ -154,6 +164,35 @@ export function MedicineDrawer({
     }
   }
 
+  const archiveProduct = async () => {
+    if (!window.confirm(`Archive ${product.name}? It will leave the active catalog but keep all history.`)) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api(`/products/${product.id}/archive`, { method: "POST" })
+      onChanged?.()
+      onClose()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not archive product")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const restoreProduct = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api(`/products/${product.id}/restore`, { method: "POST" })
+      onChanged?.()
+      onClose()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not restore product")
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <Overlay onClose={onClose} className="items-stretch justify-end p-0 backdrop-blur-sm">
       <div className="relative flex h-full w-full max-w-md flex-col overflow-hidden border-l border-border bg-card shadow-2xl animate-fade-up" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
@@ -162,8 +201,16 @@ export function MedicineDrawer({
             <Package className="size-5" />
           </span>
           <div className="min-w-0 flex-1">
-            <h2 className="text-lg font-semibold leading-tight">{product.name}</h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-lg font-semibold leading-tight">{product.name}</h2>
+              {isArchived && <Badge variant="neutral">Archived</Badge>}
+            </div>
             <p className="text-sm text-muted-foreground">{product.brand} · {product.category}</p>
+            {isArchived && product.deleted_at && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Archived {new Date(product.deleted_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+              </p>
+            )}
           </div>
           <button onClick={onClose} className="rounded-lg p-1.5 text-muted-foreground hover:bg-muted" aria-label="Close">
             <X className="size-5" />
@@ -195,7 +242,7 @@ export function MedicineDrawer({
           )}
 
           <Section title="Pricing" icon={TrendingUp}>
-            {editing && can("inventory.update") ? (
+            {editing && can("inventory.update") && !isArchived ? (
               <form
                 className="grid grid-cols-2 gap-2 rounded-xl border border-border bg-background p-3"
                 onSubmit={async (e) => {
@@ -208,9 +255,9 @@ export function MedicineDrawer({
                       method: "PATCH",
                       body: JSON.stringify({
                         name: fd.get("name"),
-                        sku: fd.get("sku"),
-                        barcode: fd.get("barcode"),
-                        category: fd.get("category"),
+                        sku: String(fd.get("sku") || "").trim() || null,
+                        barcode: String(fd.get("barcode") || "").trim() || null,
+                        category: String(fd.get("category") || "").trim() || "General",
                         selling_price: fd.get("selling_price"),
                         cost_price: fd.get("cost_price"),
                         reorder_threshold: Number(fd.get("reorder_threshold")),
@@ -226,13 +273,34 @@ export function MedicineDrawer({
                   }
                 }}
               >
-                <input name="name" required defaultValue={product.name} className="col-span-2 h-9 rounded-lg border border-border px-3 text-sm" />
-                <input name="sku" required defaultValue={product.sku} className="h-9 rounded-lg border border-border px-3 text-sm" />
-                <input name="barcode" required defaultValue={product.barcode} className="h-9 rounded-lg border border-border px-3 text-sm" />
-                <input name="category" required defaultValue={product.category} className="h-9 rounded-lg border border-border px-3 text-sm" />
-                <input name="reorder_threshold" type="number" defaultValue={product.reorder_threshold} className="h-9 rounded-lg border border-border px-3 text-sm" />
-                <input name="selling_price" defaultValue={String(product.selling_price)} className="h-9 rounded-lg border border-border px-3 text-sm" />
-                <input name="cost_price" defaultValue={String(product.cost_price)} className="h-9 rounded-lg border border-border px-3 text-sm" />
+                <label className="col-span-2 flex flex-col gap-1 text-xs text-muted-foreground">
+                  Medicine name *
+                  <input name="name" required maxLength={200} defaultValue={product.name} className="h-9 rounded-lg border border-border px-3 text-sm text-foreground" />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                  Cost price *
+                  <input name="cost_price" required type="number" min={0} step="any" defaultValue={String(product.cost_price)} className="h-9 rounded-lg border border-border px-3 text-sm text-foreground" />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                  Selling price *
+                  <input name="selling_price" required type="number" min={0} step="any" defaultValue={String(product.selling_price)} className="h-9 rounded-lg border border-border px-3 text-sm text-foreground" />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                  Reorder point *
+                  <input name="reorder_threshold" required type="number" min={0} step={1} defaultValue={product.reorder_threshold} className="h-9 rounded-lg border border-border px-3 text-sm text-foreground" />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                  Category (optional)
+                  <input name="category" defaultValue={product.category} placeholder="General" className="h-9 rounded-lg border border-border px-3 text-sm text-foreground" />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                  SKU (optional)
+                  <input name="sku" defaultValue={product.sku} className="h-9 rounded-lg border border-border px-3 text-sm text-foreground" />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                  Barcode (optional)
+                  <input name="barcode" defaultValue={product.barcode} className="h-9 rounded-lg border border-border px-3 text-sm text-foreground" />
+                </label>
                 <div className="col-span-2 flex gap-2">
                   <Button type="button" variant="outline" size="sm" className="flex-1" onClick={() => setEditing(false)}>Cancel</Button>
                   <Button type="submit" size="sm" className="flex-1" disabled={busy}>{busy ? "Saving…" : "Save product"}</Button>
@@ -244,7 +312,9 @@ export function MedicineDrawer({
                   <p className="text-2xl font-semibold">{currency(Number(product.selling_price))}<span className="ml-1 text-xs font-normal text-muted-foreground">/ unit</span></p>
                   <Badge variant="success">{margin}% margin</Badge>
                 </div>
-                <p className="mt-2 text-xs text-muted-foreground">Cost {currency(Number(product.cost_price))} · SKU {product.sku} · {product.barcode}</p>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Cost {currency(Number(product.cost_price))} · SKU {product.sku || "—"} · Barcode {product.barcode || "—"}
+                </p>
               </div>
             )}
           </Section>
@@ -254,6 +324,8 @@ export function MedicineDrawer({
               {batches.length === 0 && <p className="text-sm text-muted-foreground">No batches on file yet.</p>}
               {batches.map((b) => {
                 const left = daysUntil(b.expiry_date) ?? 0
+                const supplierLabel = b.supplier?.name ?? (b.purchase_order ? "Unknown" : "Not recorded")
+                const poLabel = b.purchase_order?.po_number || (b.purchase_order ? "Unknown" : null)
                 return (
                   <div key={b.id} className="rounded-xl border border-border bg-background p-3">
                     <div className="flex items-center justify-between text-sm">
@@ -262,14 +334,27 @@ export function MedicineDrawer({
                         {b.quantity} units · {daysLeftLabel(b.expiry_date)}
                       </span>
                     </div>
-                    <p className="mt-1 text-xs text-muted-foreground">Expires {formatExpiry(b.expiry_date, { day: "numeric", month: "long", year: "numeric" })}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Expires {formatExpiry(b.expiry_date, { day: "numeric", month: "long", year: "numeric" })}
+                      {" · "}Cost {currency(Number(b.cost_price))}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Supplier: {supplierLabel}
+                      {poLabel ? ` · PO ${poLabel}` : ""}
+                      {b.received_at ? ` · Received ${new Date(b.received_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}` : ""}
+                    </p>
+                    {b.purchase_order && b.supplier && (
+                      <p className="mt-1.5 text-[11px] text-muted-foreground/90">
+                        Batch {b.batch_number} received through {poLabel} from {b.supplier.name}
+                      </p>
+                    )}
                   </div>
                 )
               })}
             </div>
           </Section>
 
-          {can("inventory.adjust") && (
+          {can("inventory.adjust") && !isArchived && (
             <>
               <Section title="Add batch" icon={Package}>
                 <form onSubmit={addBatch} className="grid grid-cols-2 gap-2 rounded-xl border border-border bg-background p-3">
@@ -312,10 +397,21 @@ export function MedicineDrawer({
               ) : (
                 <ul className="divide-y divide-border text-sm">
                   {movements.map((mv) => (
-                    <li key={mv.id} className="flex items-center justify-between px-4 py-2.5">
-                      <span className="text-muted-foreground">{new Date(mv.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
-                      <span className="tabular-nums">{mv.movement_type} {mv.quantity > 0 ? "+" : ""}{mv.quantity}</span>
-                      <span className="font-medium tabular-nums">{mv.previous_quantity} → {mv.resulting_quantity}</span>
+                    <li key={mv.id} className="flex flex-col gap-0.5 px-4 py-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-muted-foreground">{new Date(mv.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
+                        <span className="tabular-nums">{mv.movement_type} {mv.quantity > 0 ? "+" : ""}{mv.quantity}</span>
+                        <span className="font-medium tabular-nums">{mv.previous_quantity} → {mv.resulting_quantity}</span>
+                      </div>
+                      {mv.reference_type === "purchase_order" && (mv.po_number || mv.supplier_name) && (
+                        <p className="text-xs text-muted-foreground">
+                          {mv.po_number ? `Purchase Order: ${mv.po_number}` : "Purchase Order"}
+                          {mv.supplier_name ? ` · Supplier: ${mv.supplier_name}` : ""}
+                        </p>
+                      )}
+                      {mv.reference_type === "manual_receipt" && (
+                        <p className="text-xs text-muted-foreground">Manual receipt (no PO) · Supplier: Not recorded</p>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -341,13 +437,31 @@ export function MedicineDrawer({
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
 
-        <div className="flex gap-2 border-t border-border p-4">
-          {can("inventory.update") ? (
-            <Button variant="outline" className="flex-1 gap-1.5" onClick={() => setEditing((v) => !v)}><Pencil className="size-4" /> {editing ? "Cancel edit" : "Edit"}</Button>
+        <div className="flex flex-wrap gap-2 border-t border-border p-4">
+          {isArchived ? (
+            <>
+              <Button variant="outline" className="flex-1" onClick={onClose}>Close</Button>
+              {can("inventory.restore") && (
+                <Button className="flex-1 gap-1.5" disabled={busy} onClick={() => void restoreProduct()}>
+                  <ArchiveRestore className="size-4" /> {busy ? "Restoring…" : "Restore"}
+                </Button>
+              )}
+            </>
           ) : (
-            <Button variant="outline" className="flex-1" onClick={() => onClose()}>Close</Button>
+            <>
+              {can("inventory.update") ? (
+                <Button variant="outline" className="flex-1 gap-1.5" onClick={() => setEditing((v) => !v)}><Pencil className="size-4" /> {editing ? "Cancel edit" : "Edit"}</Button>
+              ) : (
+                <Button variant="outline" className="flex-1" onClick={onClose}>Close</Button>
+              )}
+              {can("inventory.archive") && (
+                <Button variant="outline" className="gap-1.5" disabled={busy} onClick={() => void archiveProduct()}>
+                  <Archive className="size-4" /> Archive
+                </Button>
+              )}
+              <Button className="flex-1 gap-1.5" onClick={() => router.push("/pos")}><ShoppingCart className="size-4" /> Sell</Button>
+            </>
           )}
-          <Button className="flex-1 gap-1.5" onClick={() => router.push("/pos")}><ShoppingCart className="size-4" /> Sell</Button>
         </div>
       </div>
     </Overlay>

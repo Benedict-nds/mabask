@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from uuid import uuid4
 
 import jwt
 from passlib.context import CryptContext
@@ -44,6 +45,8 @@ def create_refresh_token(user_id: str) -> str:
         "type": "refresh",
         "exp": _now() + timedelta(days=settings.refresh_token_expire_days),
         "iat": _now(),
+        # Stored hashes are unique; without this, two logins in the same second collide.
+        "jti": uuid4().hex,
     }
     return jwt.encode(payload, settings.secret_key, algorithm="HS256")
 

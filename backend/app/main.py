@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from time import time
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -20,7 +21,7 @@ from app.modules.purchases.router import receiving_router
 from app.modules.purchases.router import router as purchases_router
 from app.modules.reports.router import router as reports_router
 from app.modules.sales.router import customers_router
-from app.modules.sales.router import returns_router
+from app.modules.sales.router import corrections_router, returns_router
 from app.modules.sales.router import router as sales_router
 from app.modules.settings.router import notifications_router
 from app.modules.settings.router import router as settings_router
@@ -67,7 +68,8 @@ app.add_exception_handler(Exception, unhandled_error_handler)
 
 @app.exception_handler(RequestValidationError)
 async def validation_handler(_: Request, exc: RequestValidationError):
-    return JSONResponse(status_code=422, content=error_payload("VALIDATION_ERROR", "Invalid request", {"errors": exc.errors()}))
+    errors = jsonable_encoder(exc.errors())
+    return JSONResponse(status_code=422, content=error_payload("VALIDATION_ERROR", "Invalid request", {"errors": errors}))
 
 
 @app.exception_handler(IntegrityError)
@@ -119,6 +121,7 @@ app.include_router(purchases_router)
 app.include_router(receiving_router)
 app.include_router(sales_router)
 app.include_router(returns_router)
+app.include_router(corrections_router)
 app.include_router(customers_router)
 app.include_router(reports_router)
 app.include_router(dashboard_router)

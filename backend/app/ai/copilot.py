@@ -119,7 +119,7 @@ def answer_question(db, question: str) -> CopilotAnswer:
         try:
             context = json.dumps(
                 {
-                    "low_stock": [to_product_out(p).model_dump(mode="json") for p in low[:12]],
+                    "low_stock": [to_product_out(p, db).model_dump(mode="json") for p in low[:12]],
                     "expiring": [
                         {"name": b.product.name if b.product else "", "batch": b.batch_number, "expiry": str(b.expiry_date), "qty": b.quantity}
                         for b in exp[:12]

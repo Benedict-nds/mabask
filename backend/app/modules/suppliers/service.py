@@ -28,7 +28,9 @@ def to_supplier_out(db: Session, supplier: Supplier) -> SupplierOut:
         db.query(func.coalesce(func.sum(PurchaseOrder.total), 0))
         .filter(
             PurchaseOrder.supplier_id == supplier.id,
-            PurchaseOrder.status.in_([POStatus.SUBMITTED, POStatus.APPROVED, POStatus.PARTIALLY_RECEIVED]),
+            PurchaseOrder.status.in_(
+                [POStatus.SUBMITTED, POStatus.CHANGES_REQUESTED, POStatus.APPROVED, POStatus.PARTIALLY_RECEIVED]
+            ),
         )
         .scalar()
         or 0

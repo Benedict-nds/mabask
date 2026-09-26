@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.modules.audit.service import record_audit
 from app.core.responses import UnauthorizedError
 from app.models import RefreshToken, Role, RolePermission, User
-from app.core.permissions import user_permissions
+from app.core.permissions import permission_overrides, user_permissions
 from app.core.schemas import TokenPair, UserOut
 from app.core.security import (
     create_access_token,
@@ -26,6 +26,7 @@ def to_user_out(user: User) -> UserOut:
         permissions=sorted(user_permissions(user)),
         is_active=user.is_active,
         last_login_at=user.last_login_at,
+        permission_overrides=permission_overrides(user),
     )
 
 

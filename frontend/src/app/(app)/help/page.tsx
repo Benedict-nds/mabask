@@ -9,7 +9,7 @@ export default function HelpPage() {
         <ol className="list-decimal space-y-3 pl-5 text-sm leading-relaxed text-muted-foreground">
           <li>Sign in with your staff account. Cashiers land on POS; owners land on the command center.</li>
           <li>Sell from Point of Sale. Search or scan a barcode. Totals are calculated by the server. The cart survives a refresh.</li>
-          <li>Receive stock by uploading a CSV invoice (see backend/fixtures/sample-invoice.csv) or by approving a purchase order.</li>
+          <li>Receive stock by uploading a supplier invoice CSV with Quantity, Description, Rate (unit cost), and optional Discount, Amount/Extended, and Expiry columns (see backend/fixtures/pharmacy-invoice.csv), then choose the selling-price markup before confirming. You can also receive an approved purchase order.</li>
           <li>Inventory quantities only change through sales, returns, receiving, or an explicit stock adjustment — every change is in the stock ledger.</li>
           <li>Ask the Copilot about expiry, reorders, or today&apos;s revenue. It reads this computer&apos;s database. Cloud AI is optional and is not required for selling or stock.</li>
           <li>This pharmacy PC is meant to run without internet. Keep using CSV receiving if invoice photos cannot be read offline.</li>

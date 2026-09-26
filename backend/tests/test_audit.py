@@ -61,6 +61,7 @@ def test_failed_receive_does_not_write_success_audit(client):
     )
     po_id = created.json()["id"]
     item_id = created.json()["items"][0]["id"]
+    client.post(f"/purchase-orders/{po_id}/submit", headers=headers)
     client.post(f"/purchase-orders/{po_id}/approve", headers=headers)
     before = [i["action"] for i in client.get("/audit", headers=headers).json()["items"]].count("PURCHASE_ORDER_RECEIVED")
     res = client.post(

@@ -63,6 +63,29 @@ export async function api<T>(path: string, init: RequestInit = {}, retry = true)
   return res.json()
 }
 
+/** Authenticated CSV/file download (does not parse JSON). */
+export async function downloadFile(path: string, filename: string): Promise<void> {
+  const headers = new Headers()
+  const token = getAccessToken()
+  if (token) headers.set("Authorization", `Bearer ${token}`)
+  let res = await fetch(`${BASE}${path}`, { headers })
+  if (res.status === 401) {
+    const next = await refreshAccess()
+    if (next) {
+      headers.set("Authorization", `Bearer ${next}`)
+      res = await fetch(`${BASE}${path}`, { headers })
+    }
+  }
+  if (!res.ok) throw await parseError(res)
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement("a")
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 export const authApi = {
   login: (email: string, password: string) =>
     api<AuthResponse>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),

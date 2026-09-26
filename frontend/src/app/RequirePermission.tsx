@@ -3,7 +3,7 @@
 import { useEffect } from "react"
 import { usePathname, useRouter } from "next/navigation"
 import { useAuth } from "@/app/auth"
-import { ROUTE_PERMISSIONS, homeForRole } from "@/app/permissions"
+import { ROUTE_PERMISSIONS, homeFor } from "@/app/permissions"
 
 export function RequirePermission({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
@@ -13,8 +13,9 @@ export function RequirePermission({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!needed || can(needed)) return
-    router.replace(homeForRole(user?.role))
-  }, [needed, can, user, router])
+    const home = homeFor(user)
+    if (home !== pathname) router.replace(home)
+  }, [needed, can, user, router, pathname])
 
   if (needed && !can(needed)) {
     return (

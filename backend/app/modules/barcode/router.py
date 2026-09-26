@@ -12,4 +12,4 @@ router = APIRouter(prefix="/products", tags=["barcode"])
 
 @router.get("/barcode/{code}", response_model=ProductOut)
 def barcode_lookup(code: str, db: Session = Depends(get_db), _: User = Depends(require_permission("inventory.read"))):
-    return inventory_svc.to_product_out(inventory_svc.get_by_barcode(db, code))
+    return inventory_svc.to_product_out(inventory_svc.get_by_barcode(db, code), db)

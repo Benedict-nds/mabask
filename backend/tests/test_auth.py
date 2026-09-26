@@ -50,3 +50,9 @@ def test_pharmacist_can_operate_inventory_but_not_users(client):
     assert client.get("/users", headers=headers).status_code == 403
     assert client.get("/settings", headers=headers).status_code == 200
     assert client.patch("/settings", headers=headers, json={"tax_rate": "9"}).status_code == 403
+
+
+def test_repeated_logins_in_same_second_succeed(client):
+    for _ in range(3):
+        res = client.post("/auth/login", json={"email": "grace@brightcare.pharmacy", "password": "pharmacy123"})
+        assert res.status_code == 200, res.text

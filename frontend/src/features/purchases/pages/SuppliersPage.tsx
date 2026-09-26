@@ -7,8 +7,10 @@ import { AppTopbar } from "@/components/app-topbar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Overlay } from "@/components/ui/dismissable"
+import { ProductPicker } from "@/features/inventory/components/ProductPicker"
+import { QuickAddProduct } from "@/features/inventory/components/QuickAddProduct"
 import { api, ApiError } from "@/lib/api/client"
-import type { Page, Product, PurchaseOrder, Supplier } from "@/lib/api/types"
+import type { AuditEntry, Page, Product, PurchaseOrder, Supplier } from "@/lib/api/types"
 import { currency, normalizeExpiryInput } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/lib/auth-context"
@@ -20,8 +22,35 @@ const statusMeta: Record<string, { label: string; variant: "success" | "neutral"
   inactive: { label: "Inactive", variant: "neutral" },
 }
 
+const poStatusMeta: Record<string, { label: string; variant: "success" | "neutral" | "warning" | "danger"; hint: string }> = {
+  DRAFT: { label: "Draft", variant: "neutral", hint: "Being edited — submit when ready" },
+  SUBMITTED: { label: "Submitted", variant: "warning", hint: "Waiting for review" },
+  CHANGES_REQUESTED: { label: "Changes requested", variant: "danger", hint: "Reviewer wants corrections" },
+  APPROVED: { label: "Approved", variant: "success", hint: "Ready for receiving" },
+  PARTIALLY_RECEIVED: { label: "Partially received", variant: "warning", hint: "Receive remaining stock" },
+  RECEIVED: { label: "Received", variant: "success", hint: "Fully received" },
+  CANCELLED: { label: "Cancelled", variant: "neutral", hint: "Cancelled" },
+}
+
+const poActionLabels: Record<string, string> = {
+  PURCHASE_ORDER_CREATED: "Created",
+  PURCHASE_ORDER_UPDATED: "Edited",
+  PURCHASE_ORDER_SUBMITTED: "Submitted for approval",
+  PURCHASE_ORDER_CHANGES_REQUESTED: "Changes requested",
+  PURCHASE_ORDER_APPROVED: "Approved",
+  PURCHASE_ORDER_CANCELLED: "Cancelled",
+  PURCHASE_ORDER_RECEIVED: "Stock received",
+}
+
+function poActionLabel(action: string, reviewerEdit?: boolean) {
+  if (action === "PURCHASE_ORDER_UPDATED" && reviewerEdit) return "Edited by reviewer"
+  return poActionLabels[action] ?? action.replace(/_/g, " ").toLowerCase()
+}
+
 export default function SuppliersPage() {
-  const { can } = useAuth()
+  const { can, user } = useAuth()
+  const canReviewEdit = (po: PurchaseOrder) =>
+    po.status === "SUBMITTED" && can("purchases.approve") && (po.created_by !== user?.id || user?.role === "admin")
   const router = useRouter()
   const searchParams = useSearchParams()
   const prefillId = searchParams.get("create")
@@ -32,12 +61,24 @@ export default function SuppliersPage() {
   const [prefillProductId, setPrefillProductId] = useState<string | null>(null)
   const [receiving, setReceiving] = useState<PurchaseOrder | null>(null)
   const [viewing, setViewing] = useState<PurchaseOrder | null>(null)
+  const [editing, setEditing] = useState<PurchaseOrder | null>(null)
+  const [requesting, setRequesting] = useState<PurchaseOrder | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
   const load = () => {
     api<Supplier[]>("/suppliers").then(setSuppliers).catch((e) => setError(e.message))
     api<PurchaseOrder[]>("/purchase-orders").then(setPos).catch(() => setPos([]))
+  }
+  const runPo = async (path: string, success: string) => {
+    try {
+      await api(path, { method: "POST" })
+      setNotice(success)
+      setError(null)
+      load()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Action failed")
+    }
   }
   useEffect(() => { load() }, [])
   useEffect(() => {
@@ -81,7 +122,7 @@ export default function SuppliersPage() {
           <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary"><Sparkles className="size-4" /></span>
           <p className="text-sm leading-relaxed">
             <span className="font-semibold text-primary">Purchasing: </span>
-            {pos.length} purchase orders on file. Click a PO number to review line items before you submit or approve.
+            {pos.length} purchase orders on file. Click a PO number to review line items. Submitted orders wait for approval; changes requested means the reviewer needs corrections before you submit again.
           </p>
         </div>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -121,33 +162,55 @@ export default function SuppliersPage() {
           <table className="mt-3 w-full text-sm">
             <thead>
               <tr className="text-left text-xs text-muted-foreground">
-                <th className="py-2">PO</th><th>Supplier</th><th>Status</th><th className="text-right">Total</th><th />
+                <th className="py-2">PO</th><th>Supplier</th><th>Status</th><th>Created</th><th>Creator</th><th className="text-right">Total</th><th />
               </tr>
             </thead>
             <tbody>
-              {pos.map((po) => (
+              {pos.map((po) => {
+                const meta = poStatusMeta[po.status] ?? { label: po.status, variant: "neutral" as const, hint: po.status }
+                return (
                 <tr key={po.id} className="border-t border-border">
                   <td className="py-2">
                     <button className="font-mono text-xs text-primary hover:underline" onClick={() => setViewing(po)}>{po.po_number}</button>
                   </td>
                   <td>{po.supplier_name}</td>
-                  <td><Badge variant="neutral">{po.status}</Badge></td>
+                  <td><Badge variant={meta.variant} title={meta.hint}>{meta.label}</Badge></td>
+                  <td className="whitespace-nowrap text-xs text-muted-foreground">{new Date(po.created_at).toLocaleDateString()}</td>
+                  <td className="text-xs text-muted-foreground">{po.created_by_name ?? "—"}</td>
                   <td className="text-right">{currency(Number(po.total))}</td>
                   <td className="space-x-2 text-right">
                     <Button size="sm" variant="ghost" onClick={() => setViewing(po)}>View</Button>
                     <Button size="sm" variant="ghost" onClick={() => exportPoCsv(po)}>CSV</Button>
                     {po.status === "DRAFT" && can("purchases.create") && (
-                      <Button size="sm" variant="outline" onClick={async () => { await api(`/purchase-orders/${po.id}/submit`, { method: "POST" }); setNotice("PO submitted"); load() }}>Submit</Button>
+                      <Button size="sm" variant="outline" onClick={() => setEditing(po)}>Edit</Button>
                     )}
-                    {(po.status === "DRAFT" || po.status === "SUBMITTED") && can("purchases.approve") && (
-                      <Button size="sm" onClick={async () => { await api(`/purchase-orders/${po.id}/approve`, { method: "POST" }); setNotice("PO approved"); load() }}>Approve</Button>
+                    {po.status === "DRAFT" && can("purchases.create") && (
+                      <Button size="sm" variant="outline" onClick={() => void runPo(`/purchase-orders/${po.id}/submit`, "PO submitted for approval")}>Submit</Button>
+                    )}
+                    {po.status === "DRAFT" && can("purchases.approve") && (
+                      <Button size="sm" variant="ghost" onClick={() => void runPo(`/purchase-orders/${po.id}/cancel`, "PO cancelled")}>Cancel</Button>
+                    )}
+                    {canReviewEdit(po) && (
+                      <Button size="sm" variant="outline" onClick={() => setEditing(po)}>Edit</Button>
+                    )}
+                    {po.status === "SUBMITTED" && can("purchases.approve") && (
+                      <Button size="sm" onClick={() => void runPo(`/purchase-orders/${po.id}/approve`, "PO approved")}>Approve</Button>
+                    )}
+                    {po.status === "SUBMITTED" && can("purchases.approve") && (
+                      <Button size="sm" variant="outline" onClick={() => setRequesting(po)}>Request changes</Button>
+                    )}
+                    {po.status === "SUBMITTED" && can("purchases.approve") && (
+                      <Button size="sm" variant="ghost" onClick={() => void runPo(`/purchase-orders/${po.id}/cancel`, "PO cancelled")}>Cancel</Button>
+                    )}
+                    {po.status === "CHANGES_REQUESTED" && can("purchases.create") && (
+                      <Button size="sm" variant="outline" onClick={() => setEditing(po)}>Edit</Button>
                     )}
                     {(po.status === "APPROVED" || po.status === "PARTIALLY_RECEIVED") && can("purchases.receive") && (
-                      <Button size="sm" variant="outline" onClick={() => setReceiving(po)}>Receive</Button>
+                      <Button size="sm" variant="outline" onClick={() => setReceiving(po)}>{po.status === "PARTIALLY_RECEIVED" ? "Receive remaining" : "Receive"}</Button>
                     )}
                   </td>
                 </tr>
-              ))}
+              )})}
             </tbody>
           </table>
         </div>
@@ -161,16 +224,47 @@ export default function SuppliersPage() {
           onSaved={() => { closeCreate(); setNotice("Purchase order created"); load() }}
         />
       )}
+      {editing && (
+        <CreatePO
+          suppliers={suppliers}
+          existing={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            const status = editing.status
+            setEditing(null)
+            setNotice(
+              status === "SUBMITTED"
+                ? `${editing.po_number} updated during review. It is still Submitted; approve it when ready.`
+                : status === "CHANGES_REQUESTED"
+                  ? "Saved as draft. Submit for approval when the corrections are done."
+                  : "Draft saved",
+            )
+            load()
+          }}
+        />
+      )}
       {receiving && <ReceivePO po={receiving} onClose={() => setReceiving(null)} onSaved={() => { setReceiving(null); setNotice("Stock received"); load() }} />}
+      {requesting && (
+        <RequestChanges
+          po={requesting}
+          onClose={() => setRequesting(null)}
+          onSaved={() => { setRequesting(null); setNotice("Changes requested"); load() }}
+        />
+      )}
       {viewing && (
         <ViewPO
           po={viewing}
           canSubmit={can("purchases.create")}
+          canEdit={can("purchases.create")}
+          canReviewEdit={canReviewEdit(viewing)}
+          canViewHistory={can("audit.read")}
           canApprove={can("purchases.approve")}
           canReceive={can("purchases.receive")}
           onClose={() => setViewing(null)}
           onChanged={(note) => { setViewing(null); setNotice(note); load() }}
           onReceive={() => { setReceiving(viewing); setViewing(null) }}
+          onEdit={() => { setEditing(viewing); setViewing(null) }}
+          onRequestChanges={() => { setRequesting(viewing); setViewing(null) }}
         />
       )}
     </>
@@ -224,6 +318,8 @@ function AddSupplier({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
 type POLine = {
   key: string
   product_id: string
+  product_name: string
+  sku?: string
   quantity: string
   unit_cost: string
   batch_number: string
@@ -293,7 +389,36 @@ function exportPoText(po: PurchaseOrder) {
 }
 
 function emptyLine(): POLine {
-  return { key: crypto.randomUUID(), product_id: "", quantity: "1", unit_cost: "", batch_number: "", expiry_date: "" }
+  return { key: crypto.randomUUID(), product_id: "", product_name: "", quantity: "1", unit_cost: "", batch_number: "", expiry_date: "" }
+}
+
+function lineFromProduct(product: Product, quantity = "1"): POLine {
+  return {
+    key: crypto.randomUUID(),
+    product_id: product.id,
+    product_name: product.name,
+    sku: product.sku,
+    quantity,
+    unit_cost: String(product.cost_price ?? "0"),
+    batch_number: "",
+    expiry_date: "",
+  }
+}
+
+async function matchCsvProduct(name: string): Promise<Product | null> {
+  const needle = name.trim().toLowerCase()
+  if (!needle) return null
+  try {
+    const page = await api<Page<Product>>(`/products?q=${encodeURIComponent(name.trim())}&limit=10`)
+    return (
+      page.items.find((p) => p.name.toLowerCase() === needle) ||
+      page.items.find((p) => p.sku.toLowerCase() === needle || p.barcode === name.trim()) ||
+      page.items[0] ||
+      null
+    )
+  } catch {
+    return null
+  }
 }
 
 function parsePurchaseCsv(text: string): { name: string; quantity: string; unit_cost: string; batch: string; expiry: string }[] {
@@ -324,51 +449,58 @@ function parsePurchaseCsv(text: string): { name: string; quantity: string; unit_
 function CreatePO({
   suppliers,
   productId,
+  existing,
   onClose,
   onSaved,
 }: {
   suppliers: Supplier[]
   productId?: string | null
+  existing?: PurchaseOrder | null
   onClose: () => void
   onSaved: () => void
 }) {
+  const { can } = useAuth()
+  const reviewMode = existing?.status === "SUBMITTED"
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
-  const [products, setProducts] = useState<Product[]>([])
-  const [supplierId, setSupplierId] = useState("")
-  const [notes, setNotes] = useState("")
-  const [lines, setLines] = useState<POLine[]>([emptyLine()])
+  const [supplierId, setSupplierId] = useState(existing?.supplier_id ?? "")
+  const [notes, setNotes] = useState(existing?.notes ?? "")
+  const [reviewReason, setReviewReason] = useState("")
+  const [creating, setCreating] = useState<{ key: string | null; name: string } | null>(null)
+  const [lines, setLines] = useState<POLine[]>(
+    existing?.items.length
+      ? existing.items.map((item) => ({
+          key: item.id,
+          product_id: item.product_id ?? "",
+          product_name: item.product_name,
+          quantity: String(item.quantity_ordered),
+          unit_cost: String(item.unit_cost),
+          batch_number: item.batch_number,
+          expiry_date: item.expiry_date ?? "",
+        }))
+      : [emptyLine()],
+  )
 
   useEffect(() => {
-    api<Page<Product>>("/products?limit=200").then(async (page) => {
-      let items = page.items
-      let product = productId ? items.find((p) => p.id === productId) : undefined
-      if (productId && !product) {
-        try {
-          product = await api<Product>(`/products/${productId}`)
-          items = [...items, product]
-        } catch { /* ignore */ }
-      }
-      setProducts(items)
-      if (!product) return
-      setLines([{
-        key: crypto.randomUUID(),
-        product_id: product.id,
-        quantity: String(Math.max(product.reorder_threshold - product.quantity_on_hand, 1)),
-        unit_cost: String(product.cost_price),
-        batch_number: "",
-        expiry_date: "",
-      }])
-      if (product.supplier_id) setSupplierId(product.supplier_id)
-      else {
-        const preferred = suppliers.find((s) => s.status === "preferred")
-        if (preferred) setSupplierId(preferred.id)
-      }
-    }).catch(() => setProducts([]))
-  }, [productId, suppliers])
+    if (existing || !productId) return
+    api<Product>(`/products/${productId}`)
+      .then((product) => {
+        setLines([lineFromProduct(product, String(Math.max(product.reorder_threshold - product.quantity_on_hand, 1)))])
+        if (product.supplier_id) setSupplierId(product.supplier_id)
+        else {
+          const preferred = suppliers.find((s) => s.status === "preferred")
+          if (preferred) setSupplierId(preferred.id)
+        }
+      })
+      .catch(() => undefined)
+  }, [productId, suppliers, existing])
 
   const updateLine = (key: string, patch: Partial<POLine>) => {
     setLines((current) => current.map((line) => (line.key === key ? { ...line, ...patch } : line)))
+  }
+
+  const pickProduct = (key: string, product: Product) => {
+    updateLine(key, { product_id: product.id, product_name: product.name, sku: product.sku, unit_cost: String(product.cost_price ?? "0") })
   }
 
   const addProducts = (incoming: Product[], qtyFor?: (p: Product) => string) => {
@@ -376,17 +508,25 @@ function CreatePO({
       const next = [...current.filter((line) => line.product_id)]
       for (const product of incoming) {
         if (next.some((line) => line.product_id === product.id)) continue
-        next.push({
-          key: crypto.randomUUID(),
-          product_id: product.id,
-          quantity: qtyFor ? qtyFor(product) : "1",
-          unit_cost: String(product.cost_price),
-          batch_number: "",
-          expiry_date: "",
-        })
+        next.push(lineFromProduct(product, qtyFor ? qtyFor(product) : "1"))
       }
       return next.length ? next : [emptyLine()]
     })
+  }
+
+  const applyNewMedicine = (product: Product) => {
+    const targetKey = creating?.key ?? null
+    setLines((current) => {
+      const target = targetKey ?? current.find((line) => !line.product_id)?.key
+      if (!target) return [...current, lineFromProduct(product)]
+      return current.map((line) =>
+        line.key === target
+          ? { ...line, product_id: product.id, product_name: product.name, sku: product.sku, unit_cost: String(product.cost_price ?? "0"), quantity: line.quantity || "1" }
+          : line,
+      )
+    })
+    setCreating(null)
+    setError(null)
   }
 
   const importCsv = async (file: File) => {
@@ -398,24 +538,20 @@ function CreatePO({
     }
     const unmatched: string[] = []
     const mapped: POLine[] = []
-    for (const row of rows) {
-      const needle = row.name.toLowerCase()
-      const product = products.find((p) => p.name.toLowerCase() === needle)
-        || products.find((p) => p.barcode === row.name || p.sku.toLowerCase() === needle)
-        || products.find((p) => p.name.toLowerCase().includes(needle) || needle.includes(p.name.toLowerCase()))
+    const matches = await Promise.all(rows.map((row) => matchCsvProduct(row.name)))
+    rows.forEach((row, index) => {
+      const product = matches[index]
       if (!product) {
         unmatched.push(row.name)
-        continue
+        return
       }
       mapped.push({
-        key: crypto.randomUUID(),
-        product_id: product.id,
-        quantity: row.quantity || "1",
+        ...lineFromProduct(product, row.quantity || "1"),
         unit_cost: row.unit_cost || String(product.cost_price),
         batch_number: row.batch,
         expiry_date: row.expiry ? normalizeExpiryInput(row.expiry) : "",
       })
-    }
+    })
     if (!mapped.length) {
       setError(`No products matched: ${unmatched.slice(0, 4).join(", ")}`)
       return
@@ -443,14 +579,13 @@ function CreatePO({
   }
 
   const items = lines.flatMap((line) => {
-    const product = products.find((p) => p.id === line.product_id)
     const qty = Number(line.quantity)
-    if (!product || !qty) return []
+    if (!line.product_id || !qty) return []
     return [{
-      product_id: product.id,
-      product_name: product.name,
+      product_id: line.product_id,
+      product_name: line.product_name,
       quantity_ordered: qty,
-      unit_cost: line.unit_cost || product.cost_price,
+      unit_cost: line.unit_cost || "0",
       batch_number: line.batch_number,
       expiry_date: line.expiry_date ? normalizeExpiryInput(line.expiry_date) : null,
     }]
@@ -472,27 +607,56 @@ function CreatePO({
             setError("Add at least one medicine with a quantity")
             return
           }
+          if (reviewMode && !reviewReason.trim()) {
+            setError("Explain what you changed and why. The creator and the audit log will see this.")
+            return
+          }
           setSaving(true)
           try {
-            await api("/purchase-orders", {
-              method: "POST",
-              body: JSON.stringify({ supplier_id: supplierId, notes, items }),
-            })
+            const payload = { supplier_id: supplierId, notes, items }
+            if (existing && reviewMode) {
+              await api(`/purchase-orders/${existing.id}/review-edit`, {
+                method: "PUT",
+                body: JSON.stringify({ ...payload, reason: reviewReason.trim() }),
+              })
+            } else if (existing) {
+              await api(`/purchase-orders/${existing.id}`, { method: "PUT", body: JSON.stringify(payload) })
+            } else {
+              await api("/purchase-orders", { method: "POST", body: JSON.stringify(payload) })
+            }
             onSaved()
           } catch (err) {
-            setError(err instanceof ApiError ? err.message : "Could not create PO")
+            setError(err instanceof ApiError ? err.message : existing ? "Could not save PO" : "Could not create PO")
           } finally {
             setSaving(false)
           }
         }}
       >
         <div className="space-y-1 border-b border-border p-6 pb-4">
-          <h2 className="text-lg font-semibold">Create purchase order</h2>
+          <h2 className="text-lg font-semibold">
+            {reviewMode ? `Review edit · ${existing?.po_number}` : existing ? "Edit purchase order" : "Create purchase order"}
+          </h2>
           <p className="text-sm text-muted-foreground">
-            {productId
-              ? "This medicine is already on the order with a suggested restock quantity. Pick a supplier and save."
-              : "One order can include many medicines. Import a CSV if you already have the list."}
+            {reviewMode
+              ? "You are editing a submitted order as the reviewer. It stays Submitted; approve it afterwards. Your reason and line changes are recorded in the audit log."
+              : existing?.status === "CHANGES_REQUESTED"
+              ? "Saving stores a draft. You still need to submit it for approval."
+              : existing
+                ? "Update the lines, then save. Submit from the PO list when it is ready for review."
+              : productId
+                ? "This medicine is already on the order with a suggested restock quantity. Pick a supplier and save."
+                : "One order can include many medicines. Import a CSV if you already have the list."}
           </p>
+          {existing?.review_comment && (
+            <div className="mt-3 rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm">
+              <p className="font-medium text-warning-foreground">Changes requested</p>
+              <p className="mt-1">{existing.review_comment}</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {existing.review_requested_by_name ? `${existing.review_requested_by_name} · ` : ""}
+                {existing.review_requested_at ? new Date(existing.review_requested_at).toLocaleString() : ""}
+              </p>
+            </div>
+          )}
         </div>
         <div className="space-y-3 overflow-y-auto p-6">
           <select value={supplierId} onChange={(e) => setSupplierId(e.target.value)} required className="h-10 w-full rounded-lg border border-border px-3 text-sm">
@@ -501,8 +665,19 @@ function CreatePO({
           </select>
           <div className="flex flex-wrap gap-2">
             <Button type="button" variant="outline" size="sm" className="gap-1.5" onClick={() => setLines((c) => [...c, emptyLine()])}>
-              <Plus className="size-3.5" /> Add medicine
+              <Plus className="size-3.5" /> Add line
             </Button>
+            {can("inventory.create") && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                onClick={() => setCreating({ key: null, name: "" })}
+              >
+                <Plus className="size-3.5" /> Create new medicine
+              </Button>
+            )}
             <Button type="button" variant="outline" size="sm" onClick={addLowStock}>Add low-stock items</Button>
             <label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border border-border px-3 text-sm font-medium hover:bg-muted">
               <FileUp className="size-3.5" /> Import CSV
@@ -516,15 +691,15 @@ function CreatePO({
               Download template
             </a>
           </div>
-          <div className="overflow-hidden rounded-xl border border-border">
+          <div className="rounded-xl border border-border">
             <table className="w-full text-sm">
               <thead className="bg-muted/40 text-left text-xs uppercase text-muted-foreground">
                 <tr>
                   <th className="px-3 py-2 font-medium">Medicine</th>
                   <th className="px-3 py-2 font-medium">Qty</th>
                   <th className="px-3 py-2 font-medium">Unit cost</th>
-                  <th className="px-3 py-2 font-medium">Batch</th>
-                  <th className="px-3 py-2 font-medium">Expiry</th>
+                  <th className="px-3 py-2 font-medium">Batch (optional)</th>
+                  <th className="px-3 py-2 font-medium">Expiry (optional)</th>
                   <th className="px-3 py-2 font-medium" />
                 </tr>
               </thead>
@@ -532,17 +707,18 @@ function CreatePO({
                 {lines.map((line) => (
                   <tr key={line.key}>
                     <td className="px-2 py-2">
-                      <select
-                        value={line.product_id}
-                        onChange={(e) => {
-                          const product = products.find((p) => p.id === e.target.value)
-                          updateLine(line.key, { product_id: e.target.value, unit_cost: product ? String(product.cost_price) : line.unit_cost })
-                        }}
-                        className="h-9 w-full min-w-48 rounded-lg border border-border px-2 text-sm"
-                      >
-                        <option value="">Select medicine</option>
-                        {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                      </select>
+                      <div className="min-w-56">
+                        <ProductPicker
+                          value={line.product_id ? { id: line.product_id, name: line.product_name, sku: line.sku } : null}
+                          onSelect={(p) => pickProduct(line.key, p)}
+                          onClear={() => updateLine(line.key, { product_id: "", product_name: "", sku: undefined })}
+                          onCreateNew={can("inventory.create") ? (name) => setCreating({ key: line.key, name }) : undefined}
+                          placeholder="Search medicine…"
+                        />
+                        {!line.product_id && line.product_name && (
+                          <p className="mt-1 text-xs text-warning-foreground">“{line.product_name}” is not linked to a catalog medicine</p>
+                        )}
+                      </div>
                     </td>
                     <td className="px-2 py-2"><input value={line.quantity} onChange={(e) => updateLine(line.key, { quantity: e.target.value })} type="number" min={1} className="h-9 w-20 rounded-lg border border-border px-2 text-sm" /></td>
                     <td className="px-2 py-2"><input value={line.unit_cost} onChange={(e) => updateLine(line.key, { unit_cost: e.target.value })} className="h-9 w-24 rounded-lg border border-border px-2 text-sm" /></td>
@@ -559,16 +735,41 @@ function CreatePO({
             </table>
           </div>
           <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes for this order" className="h-10 w-full rounded-lg border border-border px-3 text-sm" />
+          {reviewMode && (
+            <label className="flex flex-col gap-1 text-sm">
+              Reason for review changes (required)
+              <textarea
+                value={reviewReason}
+                onChange={(e) => setReviewReason(e.target.value)}
+                maxLength={500}
+                rows={2}
+                placeholder="e.g. Reduced Amoxicillin to 200 units, supplier minimum order changed"
+                className="rounded-lg border border-border px-3 py-2 text-sm"
+              />
+            </label>
+          )}
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
         <div className="flex items-center justify-between gap-3 border-t border-border p-6 pt-4">
           <p className="text-sm text-muted-foreground">{items.length} medicine{items.length === 1 ? "" : "s"} · {currency(total)}</p>
           <div className="flex gap-2">
             <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
-            <Button type="submit" disabled={saving}>{saving ? "Saving…" : "Create draft"}</Button>
+            <Button type="submit" disabled={saving}>
+              {saving ? "Saving…" : reviewMode ? "Save review changes" : existing ? "Save draft" : "Create draft"}
+            </Button>
           </div>
         </div>
       </form>
+      {creating && (
+        <QuickAddProduct
+          catalogOnly
+          title="Create new medicine"
+          initialName={creating.name}
+          defaultSupplierId={supplierId || null}
+          onClose={() => setCreating(null)}
+          onSaved={applyNewMedicine}
+        />
+      )}
     </Overlay>
   )
 }
@@ -576,27 +777,45 @@ function CreatePO({
 function ViewPO({
   po,
   canSubmit,
+  canEdit,
+  canReviewEdit,
+  canViewHistory,
   canApprove,
   canReceive,
   onClose,
   onChanged,
   onReceive,
+  onEdit,
+  onRequestChanges,
 }: {
   po: PurchaseOrder
   canSubmit: boolean
+  canEdit: boolean
+  canReviewEdit: boolean
+  canViewHistory: boolean
   canApprove: boolean
   canReceive: boolean
   onClose: () => void
   onChanged: (note: string) => void
   onReceive: () => void
+  onEdit: () => void
+  onRequestChanges: () => void
 }) {
   const [detail, setDetail] = useState<PurchaseOrder>(po)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const meta = poStatusMeta[detail.status] ?? { label: detail.status, variant: "neutral" as const, hint: detail.status }
+
+  const [history, setHistory] = useState<AuditEntry[]>([])
 
   useEffect(() => {
     api<PurchaseOrder>(`/purchase-orders/${po.id}`).then(setDetail).catch(() => setDetail(po))
-  }, [po])
+    if (canViewHistory) {
+      api<Page<AuditEntry>>(`/audit?entity_type=purchase_order&entity_id=${po.id}&limit=50`)
+        .then((page) => setHistory([...page.items].reverse()))
+        .catch(() => setHistory([]))
+    }
+  }, [po, canViewHistory])
 
   const act = async (path: string, note: string) => {
     setBusy(true)
@@ -618,10 +837,22 @@ function ViewPO({
           <div>
             <p className="font-mono text-xs text-muted-foreground">{detail.po_number}</p>
             <h2 className="text-lg font-semibold">{detail.supplier_name ?? "Purchase order"}</h2>
-            <p className="text-sm text-muted-foreground">{detail.notes || "No notes"} · {new Date(detail.created_at).toLocaleString()}</p>
+            <p className="text-sm text-muted-foreground">{detail.notes || "No notes"} · {new Date(detail.created_at).toLocaleString()}{detail.created_by_name ? ` · ${detail.created_by_name}` : ""}</p>
+            <p className="mt-1 text-xs text-muted-foreground">{meta.hint}</p>
           </div>
-          <Badge variant="neutral">{detail.status}</Badge>
+          <Badge variant={meta.variant}>{meta.label}</Badge>
         </div>
+        {detail.status === "CHANGES_REQUESTED" && detail.review_comment && (
+          <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-4">
+            <p className="text-sm font-semibold text-destructive">Changes requested</p>
+            <p className="mt-2 text-sm">Reason: {detail.review_comment}</p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Requested by: {detail.review_requested_by_name ?? "Reviewer"}
+              {detail.review_requested_at ? ` · ${new Date(detail.review_requested_at).toLocaleString()}` : ""}
+            </p>
+            <p className="mt-2 text-xs text-muted-foreground">Edit the order, save as a draft, then submit for approval again.</p>
+          </div>
+        )}
         <div className="overflow-hidden rounded-xl border border-border">
           <table className="w-full text-sm">
             <thead className="bg-muted/40 text-left text-xs uppercase text-muted-foreground">
@@ -655,6 +886,30 @@ function ViewPO({
           <span className="text-muted-foreground">{detail.items.length} line{detail.items.length === 1 ? "" : "s"}</span>
           <span className="font-semibold">Total {currency(Number(detail.total))}</span>
         </div>
+        {canViewHistory && history.length > 0 && (
+          <div className="rounded-xl border border-border p-3">
+            <p className="text-xs font-semibold uppercase text-muted-foreground">History</p>
+            <ol className="mt-2 space-y-2 text-sm">
+              {history.map((entry) => {
+                const d = entry.details as { reason?: string; changes?: string[]; reviewer_edit?: boolean }
+                return (
+                  <li key={entry.id}>
+                    <p>
+                      <span className="font-medium">{poActionLabel(entry.action, d.reviewer_edit)}</span>
+                      <span className="text-muted-foreground"> · {entry.actor ?? "System"} · {new Date(entry.created_at).toLocaleString()}</span>
+                    </p>
+                    {d.reason && <p className="text-xs">Reason: {d.reason}</p>}
+                    {Array.isArray(d.changes) && d.changes.length > 0 && (
+                      <ul className="ml-4 list-disc text-xs text-muted-foreground">
+                        {d.changes.map((c) => <li key={c}>{c}</li>)}
+                      </ul>
+                    )}
+                  </li>
+                )
+              })}
+            </ol>
+          </div>
+        )}
         {error && <p className="text-sm text-destructive">{error}</p>}
         <div className="flex flex-wrap justify-end gap-2">
           <Button type="button" variant="outline" className="gap-1.5" onClick={() => exportPoCsv(detail)}>
@@ -664,17 +919,84 @@ function ViewPO({
             <Download className="size-3.5" /> Export text
           </Button>
           <Button type="button" variant="ghost" onClick={onClose}>Close</Button>
-          {detail.status === "DRAFT" && canSubmit && (
-            <Button variant="outline" disabled={busy} onClick={() => act("submit", "PO submitted")}>Submit</Button>
+          {(detail.status === "DRAFT" || detail.status === "CHANGES_REQUESTED") && canEdit && (
+            <Button variant="outline" onClick={onEdit}>Edit</Button>
           )}
-          {(detail.status === "DRAFT" || detail.status === "SUBMITTED") && canApprove && (
+          {detail.status === "DRAFT" && canSubmit && (
+            <Button disabled={busy} onClick={() => act("submit", "PO submitted for approval")}>Submit for approval</Button>
+          )}
+          {detail.status === "DRAFT" && canApprove && (
+            <Button variant="ghost" disabled={busy} onClick={() => act("cancel", "PO cancelled")}>Cancel</Button>
+          )}
+          {canReviewEdit && (
+            <Button variant="outline" onClick={onEdit}>Edit</Button>
+          )}
+          {detail.status === "SUBMITTED" && canApprove && (
+            <Button variant="outline" onClick={onRequestChanges}>Request changes</Button>
+          )}
+          {detail.status === "SUBMITTED" && canApprove && (
             <Button disabled={busy} onClick={() => act("approve", "PO approved")}>Approve</Button>
           )}
+          {detail.status === "SUBMITTED" && canApprove && (
+            <Button variant="ghost" disabled={busy} onClick={() => act("cancel", "PO cancelled")}>Cancel</Button>
+          )}
           {(detail.status === "APPROVED" || detail.status === "PARTIALLY_RECEIVED") && canReceive && (
-            <Button variant="outline" onClick={onReceive}>Receive</Button>
+            <Button variant="outline" onClick={onReceive}>{detail.status === "PARTIALLY_RECEIVED" ? "Receive remaining" : "Receive"}</Button>
           )}
         </div>
       </div>
+    </Overlay>
+  )
+}
+
+function RequestChanges({ po, onClose, onSaved }: { po: PurchaseOrder; onClose: () => void; onSaved: () => void }) {
+  const [reason, setReason] = useState("")
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const trimmed = reason.trim()
+    if (!trimmed) {
+      setError("A reason is required")
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      await api(`/purchase-orders/${po.id}/request-changes`, { method: "POST", body: JSON.stringify({ reason: trimmed }) })
+      onSaved()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not request changes")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Overlay onClose={onClose}>
+      <form className="w-full max-w-md space-y-3 rounded-2xl border border-border bg-card p-6" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+        <div>
+          <h2 className="text-lg font-semibold">Request changes</h2>
+          <p className="mt-1 text-sm text-muted-foreground">{po.po_number} · {po.supplier_name ?? "Purchase order"}</p>
+        </div>
+        <label className="flex flex-col gap-1.5 text-sm">
+          Reason for changes
+          <textarea
+            required
+            rows={4}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Explain what needs to be corrected before approval."
+            className="rounded-lg border border-border px-3 py-2 text-sm outline-none"
+          />
+        </label>
+        {error && <p className="text-sm text-destructive">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button type="submit" disabled={saving}>{saving ? "Sending…" : "Request changes"}</Button>
+        </div>
+      </form>
     </Overlay>
   )
 }

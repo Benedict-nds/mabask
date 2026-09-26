@@ -19,6 +19,7 @@ import {
   X,
   LogOut,
   ScrollText,
+  FileWarning,
   Sun,
   Moon,
   Monitor,
@@ -35,6 +36,7 @@ const nav = [
     { href: "/suppliers", label: "Suppliers", icon: Users, permission: "suppliers.read" },
     { href: "/receiving", label: "Receive Shipment", icon: Truck, permission: "purchases.receive" },
     { href: "/pos", label: "Point of Sale", icon: ShoppingCart, permission: "sales.create" },
+    { href: "/corrections", label: "Sale Corrections", icon: FileWarning, permission: "sales.correction_approve" },
   ]},
   { section: "Intelligence", items: [
     { href: "/reports", label: "Reports", icon: BarChart3, permission: "reports.read" },

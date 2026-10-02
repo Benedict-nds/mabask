@@ -80,13 +80,14 @@ export function MedicineDrawer({
     setNotice(null)
     setError(null)
     setProduct(medicine.raw)
-    api<Product>(`/products/${medicine.id}`)
+    const id = medicine.id
+    api<Product>(`/products/${id}`)
       .then(setProduct)
       .catch(() => setProduct(medicine.raw))
-    api<Page<Movement>>(`/stock-movements?product_id=${medicine.id}&limit=8`)
+    api<Page<Movement>>(`/stock-movements?product_id=${id}&limit=8`)
       .then((page) => setMovements(page.items))
       .catch(() => setMovements([]))
-  }, [medicine])
+  }, [medicine?.id])
 
   const refreshLive = useCallback((silent?: boolean) => {
     if (!medicine) return
@@ -282,9 +283,18 @@ export function MedicineDrawer({
               </p>
             )}
           </div>
-          {canEditProduct && !editing && (
-            <Button variant="outline" size="sm" className="gap-1.5" onClick={() => { setEditing(true); setNotice(null) }}>
-              <Pencil className="size-3.5" /> Edit medicine
+          {canEditProduct && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={() => {
+                setEditing((v) => !v)
+                setNotice(null)
+              }}
+            >
+              <Pencil className="size-3.5" /> {editing ? "Cancel edit" : "Edit medicine"}
             </Button>
           )}
           <button onClick={onClose} className="rounded-lg p-1.5 text-muted-foreground hover:bg-muted" aria-label="Close">
@@ -550,7 +560,7 @@ export function MedicineDrawer({
           ) : (
             <>
               {can("inventory.update") ? (
-                <Button variant="outline" className="flex-1 gap-1.5" onClick={() => { setEditing((v) => !v); setNotice(null) }}><Pencil className="size-4" /> {editing ? "Cancel edit" : "Edit medicine"}</Button>
+                <Button type="button" variant="outline" className="flex-1 gap-1.5" onClick={() => { setEditing((v) => !v); setNotice(null) }}><Pencil className="size-4" /> {editing ? "Cancel edit" : "Edit medicine"}</Button>
               ) : (
                 <Button variant="outline" className="flex-1" onClick={onClose}>Close</Button>
               )}

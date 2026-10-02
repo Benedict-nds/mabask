@@ -36,6 +36,8 @@ export function Overlay({
   children: ReactNode
   className?: string
 }) {
+  const backdropPointer = useRef(false)
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose()
@@ -47,7 +49,15 @@ export function Overlay({
   return (
     <div
       className={cn("fixed inset-0 z-50 flex items-center justify-center bg-foreground/20 p-4", className)}
-      onClick={onClose}
+      onPointerDown={(e) => {
+        backdropPointer.current = e.target === e.currentTarget
+      }}
+      onClick={(e) => {
+        // Close only when the gesture started and ended on the dimmer. A click that
+        // began on drawer content (then the control unmounted) must not close.
+        if (backdropPointer.current && e.target === e.currentTarget) onClose()
+        backdropPointer.current = false
+      }}
     >
       {children}
     </div>

@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
@@ -12,6 +13,7 @@ from app.core.schemas import (
     BatchOut,
     BatchPurchaseOrderOut,
     BatchSupplierOut,
+    BatchUpdate,
     MovementOut,
     ProductCreate,
     ProductOut,
@@ -319,12 +321,32 @@ def update_product(db: Session, product_id: str, data: ProductUpdate, actor: Use
         payload.get("barcode") if payload.get("barcode") != product.barcode else None,
         exclude_id=product.id,
     )
+    changes = [
+        f"{key}: {_audit_value(getattr(product, key))} → {_audit_value(value)}"
+        for key, value in payload.items()
+        if getattr(product, key) != value
+    ]
     for key, value in payload.items():
         setattr(product, key, value)
     action = "PRODUCT_DEACTIVATED" if payload.get("is_active") is False else "PRODUCT_UPDATED"
-    record_audit(db, user=actor, action=action, entity_type="product", entity_id=product.id)
+    record_audit(
+        db,
+        user=actor,
+        action=action,
+        entity_type="product",
+        entity_id=product.id,
+        details={"name": product.name, "changes": changes},
+    )
     db.commit()
     return to_product_out(_get(db, product.id), db)
+
+
+def _audit_value(value: object) -> str:
+    if value is None or value == "":
+        return "—"
+    if isinstance(value, Decimal):
+        return format(value.normalize(), "f")
+    return str(value)
 
 
 def deactivate_product(db: Session, product_id: str, actor: User) -> ProductOut:
@@ -412,6 +434,53 @@ def add_batch(db: Session, product_id: str, data: BatchCreate, actor: User) -> P
         entity_type="batch",
         entity_id=batch.id,
         details={"product_id": product.id, "batch_number": batch.batch_number, "quantity": data.quantity},
+    )
+    db.commit()
+    return to_product_out(_get(db, product.id), db)
+
+
+EXPIRY_MIN = date(2000, 1, 1)
+EXPIRY_MAX = date(2099, 12, 31)
+
+
+def update_batch_expiry(db: Session, product_id: str, batch_id: str, data: BatchUpdate, actor: User) -> ProductOut:
+    """Correct a mis-entered batch expiry. Sales, PO lines and movements are not touched."""
+    product = _get(db, product_id, include_archived=True)
+    if product.deleted_at is not None:
+        raise ConflictError("Restore this medicine before editing its batches")
+    batch = (
+        db.query(Batch)
+        .filter(Batch.id == batch_id, Batch.product_id == product.id, Batch.is_active.is_(True))
+        .with_for_update()
+        .first()
+    )
+    if batch is None:
+        raise NotFoundError("Batch not found")
+    reason = data.reason.strip()
+    if not reason:
+        raise ValidationAppError("A reason is required to change an expiry date")
+    new_expiry = data.expiry_date
+    if not EXPIRY_MIN <= new_expiry <= EXPIRY_MAX:
+        raise ValidationAppError("Expiry date must be between 2000-01-01 and 2099-12-31", {"expiry_date": new_expiry.isoformat()})
+    previous = batch.expiry_date
+    if new_expiry == previous:
+        return to_product_out(product, db)
+    batch.expiry_date = new_expiry
+    record_audit(
+        db,
+        user=actor,
+        action="BATCH_EXPIRY_CHANGED",
+        entity_type="batch",
+        entity_id=batch.id,
+        details={
+            "product_id": product.id,
+            "product": product.name,
+            "batch_number": batch.batch_number,
+            "previous_expiry": previous.isoformat(),
+            "new_expiry": new_expiry.isoformat(),
+            "quantity": batch.quantity,
+            "reason": reason,
+        },
     )
     db.commit()
     return to_product_out(_get(db, product.id), db)

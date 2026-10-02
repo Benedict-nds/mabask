@@ -50,9 +50,13 @@ const detailLabels: Record<string, string> = {
   target_user: "Staff member",
   target_name: "Name",
   role: "Role",
+  previous_expiry: "From",
+  new_expiry: "To",
+  batch_number: "Batch",
+  product: "Medicine",
 }
 
-const HIDDEN_DETAIL_KEYS = new Set(["sale_id", "corrected_sale_id", "return_id"])
+const HIDDEN_DETAIL_KEYS = new Set(["sale_id", "corrected_sale_id", "return_id", "product_id"])
 
 function humanizeAction(action: string) {
   const text = action.replace(/_/g, " ").toLowerCase()
@@ -76,6 +80,7 @@ function summary(row: AuditEntry) {
   const parts: string[] = []
   if (d.permission && d.previous && d.new) parts.push(`${d.permission}: ${formatValue(d.previous)} → ${formatValue(d.new)}`)
   else if (row.action === "ROLE_CHANGED" && d.previous && d.new) parts.push(`Role ${formatValue(d.previous)} → ${formatValue(d.new)}`)
+  if (d.previous_expiry && d.new_expiry) parts.push(`Expiry ${formatValue(d.previous_expiry)} → ${formatValue(d.new_expiry)}`)
   if (d.previous_status && d.new_status) parts.push(`${formatValue(d.previous_status)} → ${formatValue(d.new_status)}`)
   else if (d.new_status) parts.push(`Status ${formatValue(d.new_status)}`)
   if (d.reason) parts.push(`Reason: ${formatValue(d.reason)}`)

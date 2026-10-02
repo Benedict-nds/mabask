@@ -5,7 +5,7 @@ from app.core.db import get_db
 from app.models import User
 from app.core.permissions import has_permission, require_permission
 from app.core.responses import ForbiddenError
-from app.core.schemas import BatchCreate, InventoryCounts, MovementOut, Page, ProductCreate, ProductOut, ProductUpdate, StockAdjustIn
+from app.core.schemas import BatchCreate, BatchUpdate, InventoryCounts, MovementOut, Page, ProductCreate, ProductOut, ProductUpdate, StockAdjustIn
 from app.modules.inventory import service as inventory_svc
 
 router = APIRouter(prefix="/products", tags=["inventory"])
@@ -92,6 +92,17 @@ def restore_product(product_id: str, db: Session = Depends(get_db), actor: User 
 @router.post("/{product_id}/batches", response_model=ProductOut, status_code=201)
 def add_batch(product_id: str, body: BatchCreate, db: Session = Depends(get_db), actor: User = Depends(require_permission("inventory.adjust"))):
     return inventory_svc.add_batch(db, product_id, body, actor)
+
+
+@router.patch("/{product_id}/batches/{batch_id}", response_model=ProductOut)
+def update_batch(
+    product_id: str,
+    batch_id: str,
+    body: BatchUpdate,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_permission("inventory.batch_edit")),
+):
+    return inventory_svc.update_batch_expiry(db, product_id, batch_id, body, actor)
 
 
 @router.post("/{product_id}/adjust", response_model=ProductOut)

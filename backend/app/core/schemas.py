@@ -212,6 +212,11 @@ class ProductOut(BaseModel):
     batches: list[BatchOut] = []
 
 
+class BatchUpdate(BaseModel):
+    expiry_date: Expiry
+    reason: str = Field(max_length=255)
+
+
 class BatchCreate(BaseModel):
     batch_number: str
     expiry_date: Expiry

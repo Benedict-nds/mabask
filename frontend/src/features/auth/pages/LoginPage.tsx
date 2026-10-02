@@ -3,8 +3,9 @@
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import Image from "next/image"
-import { Boxes, Mail, Lock, ArrowRight, ShieldCheck, Sparkles, Eye, EyeOff, Sun, Moon } from "lucide-react"
+import { Boxes, Mail, Lock, ArrowRight, ShieldCheck, Sparkles, Sun, Moon } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { PasswordInput } from "@/components/ui/password-input"
 import { useAuth } from "@/lib/auth-context"
 import { useTheme } from "@/app/theme"
 import { homeFor } from "@/app/permissions"
@@ -14,7 +15,6 @@ export default function LoginPage() {
   const { login, loading, user } = useAuth()
   const { resolved, setTheme } = useTheme()
   const router = useRouter()
-  const [showPw, setShowPw] = useState(false)
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [error, setError] = useState<string | null>(null)
@@ -85,13 +85,17 @@ export default function LoginPage() {
               <div className="flex items-center justify-between">
                 <label htmlFor="password" className="text-sm font-medium">Password</label>
               </div>
-              <div className="flex h-11 items-center gap-2.5 rounded-xl border border-border bg-card px-3.5 focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/20">
-                <Lock className="size-4 text-muted-foreground" />
-                <input id="password" type={showPw ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} required className="h-full flex-1 bg-transparent text-sm outline-none" placeholder="••••••••" />
-                <button type="button" onClick={() => setShowPw((s) => !s)} className="text-muted-foreground hover:text-foreground" aria-label="Toggle password visibility">
-                  {showPw ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                </button>
-              </div>
+              <PasswordInput
+                id="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                autoComplete="current-password"
+                placeholder="••••••••"
+                wrapperClassName="h-11 gap-2.5 rounded-xl bg-card pl-3.5"
+                className="px-0"
+                leading={<Lock className="size-4 text-muted-foreground" />}
+              />
             </div>
 
             {error && (

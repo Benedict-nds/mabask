@@ -19,6 +19,7 @@ ALL_PERMISSIONS = [
     ("inventory.archive", "Archive products from the active catalog"),
     ("inventory.restore", "Restore archived products"),
     ("inventory.adjust", "Adjust stock quantities"),
+    ("inventory.batch_edit", "Correct batch expiry dates"),
     ("sales.read", "View sales"),
     ("sales.create", "Complete sales"),
     ("sales.refund", "Process returns"),

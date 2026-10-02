@@ -5,6 +5,7 @@ import { AppTopbar } from "@/components/app-topbar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Overlay } from "@/components/ui/dismissable"
+import { PasswordInput } from "@/components/ui/password-input"
 import { api, ApiError } from "@/lib/api/client"
 import type { OverrideState, PermissionInfo, Role, User, UserPermissions } from "@/lib/api/types"
 import { useAuth } from "@/lib/auth-context"
@@ -229,9 +230,10 @@ function CreateMember({
             {roles.map((r) => <option key={r.name} value={r.name}>{r.name}</option>)}
           </select>
         </label>
-        <label className="block text-sm">Password
-          <input name="password" type="password" minLength={8} required className="mt-1 h-10 w-full rounded-lg border border-border px-3" />
-        </label>
+        <div className="text-sm">
+          <label htmlFor="new-staff-password">Password</label>
+          <PasswordInput id="new-staff-password" name="password" minLength={8} required wrapperClassName="mt-1" />
+        </div>
         <div className="rounded-xl border border-border bg-muted/30 p-3">
           <div className="flex items-start justify-between gap-2">
             <div>
@@ -396,9 +398,10 @@ function MemberDetails({
           <option value="false">Inactive</option>
         </select>
       </label>
-      <label className="block text-sm">New password (optional)
-        <input name="password" type="password" minLength={8} className="mt-1 h-10 w-full rounded-lg border border-border px-3" />
-      </label>
+      <div className="text-sm">
+        <label htmlFor="member-new-password">New password (optional)</label>
+        <PasswordInput id="member-new-password" name="password" minLength={8} wrapperClassName="mt-1" />
+      </div>
       {error && <p className="text-sm text-destructive">{error}</p>}
       <div className="flex justify-end gap-2">
         {canDelete && !isSelf && (

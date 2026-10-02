@@ -65,6 +65,8 @@ export function MedicineDrawer({
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState(false)
+  const [editingBatch, setEditingBatch] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const isArchived = catalogMode === "archived" || Boolean(product?.deleted_at ?? medicine?.raw.deleted_at)
 
   useEffect(() => {
@@ -74,6 +76,9 @@ export function MedicineDrawer({
       return
     }
     setEditing(false)
+    setEditingBatch(null)
+    setNotice(null)
+    setError(null)
     setProduct(medicine.raw)
     api<Product>(`/products/${medicine.id}`)
       .then(setProduct)
@@ -179,6 +184,71 @@ export function MedicineDrawer({
     }
   }
 
+  const canEditProduct = can("inventory.update") && !isArchived
+  const canEditBatch = can("inventory.batch_edit") && !isArchived
+
+  const saveProduct = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    const fd = new FormData(e.currentTarget)
+    const text = (key: string) => String(fd.get(key) ?? "").trim()
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const next = await api<Product>(`/products/${product.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: text("name"),
+          cost_price: text("cost_price"),
+          selling_price: text("selling_price"),
+          reorder_threshold: Number(text("reorder_threshold")),
+          brand: text("brand"),
+          generic_name: text("generic_name"),
+          category: text("category") || "General",
+          sku: text("sku") || null,
+          barcode: text("barcode") || null,
+          dosage_form: text("dosage_form"),
+          strength: text("strength"),
+          unit: text("unit"),
+          description: text("description"),
+        }),
+      })
+      setProduct(next)
+      setEditing(false)
+      setNotice("Medicine updated")
+      onChanged?.()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Update failed")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const saveBatchExpiry = async (e: React.FormEvent<HTMLFormElement>, batchId: string, batchNumber: string) => {
+    e.preventDefault()
+    const fd = new FormData(e.currentTarget)
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const next = await api<Product>(`/products/${product.id}/batches/${batchId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          expiry_date: normalizeExpiryInput(String(fd.get("expiry_date") || "")),
+          reason: String(fd.get("reason") || "").trim(),
+        }),
+      })
+      setProduct(next)
+      setEditingBatch(null)
+      setNotice(`Expiry updated for batch ${batchNumber}`)
+      onChanged?.()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not update expiry")
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const restoreProduct = async () => {
     setBusy(true)
     setError(null)
@@ -212,6 +282,11 @@ export function MedicineDrawer({
               </p>
             )}
           </div>
+          {canEditProduct && !editing && (
+            <Button variant="outline" size="sm" className="gap-1.5" onClick={() => { setEditing(true); setNotice(null) }}>
+              <Pencil className="size-3.5" /> Edit medicine
+            </Button>
+          )}
           <button onClick={onClose} className="rounded-lg p-1.5 text-muted-foreground hover:bg-muted" aria-label="Close">
             <X className="size-5" />
           </button>
@@ -226,6 +301,63 @@ export function MedicineDrawer({
               <Badge variant={meta.variant} className="mt-1.5">{meta.label}</Badge>
             </div>
           </div>
+
+          {notice && (
+            <p role="status" className="rounded-xl border border-primary/30 bg-primary/10 px-3 py-2 text-sm text-primary">{notice}</p>
+          )}
+
+          {editing && canEditProduct && (
+            <Section title="Edit medicine" icon={Pencil}>
+              <form className="grid grid-cols-2 gap-2 rounded-xl border border-border bg-background p-3" onSubmit={saveProduct}>
+                <Field label="Medicine name *" className="col-span-2">
+                  <input name="name" required maxLength={200} defaultValue={product.name} className={fieldCls} />
+                </Field>
+                <Field label="Cost price *">
+                  <input name="cost_price" required type="number" min={0} step="any" inputMode="decimal" defaultValue={String(product.cost_price)} className={fieldCls} />
+                </Field>
+                <Field label="Selling price *">
+                  <input name="selling_price" required type="number" min={0} step="any" inputMode="decimal" defaultValue={String(product.selling_price)} className={fieldCls} />
+                </Field>
+                <Field label="Reorder point *">
+                  <input name="reorder_threshold" required type="number" min={0} step={1} defaultValue={product.reorder_threshold} className={fieldCls} />
+                </Field>
+                <Field label="Category">
+                  <input name="category" defaultValue={product.category} placeholder="General" maxLength={80} className={fieldCls} />
+                </Field>
+                <Field label="Brand">
+                  <input name="brand" defaultValue={product.brand} maxLength={120} className={fieldCls} />
+                </Field>
+                <Field label="Generic name">
+                  <input name="generic_name" defaultValue={product.generic_name} maxLength={200} className={fieldCls} />
+                </Field>
+                <Field label="SKU">
+                  <input name="sku" defaultValue={product.sku} maxLength={40} className={fieldCls} />
+                </Field>
+                <Field label="Barcode">
+                  <input name="barcode" defaultValue={product.barcode} maxLength={64} className={fieldCls} />
+                </Field>
+                <Field label="Dosage form">
+                  <input name="dosage_form" defaultValue={product.dosage_form} maxLength={80} className={fieldCls} />
+                </Field>
+                <Field label="Strength">
+                  <input name="strength" defaultValue={product.strength} maxLength={80} className={fieldCls} />
+                </Field>
+                <Field label="Unit">
+                  <input name="unit" defaultValue={product.unit} maxLength={40} className={fieldCls} />
+                </Field>
+                <Field label="Description" className="col-span-2">
+                  <textarea name="description" rows={2} defaultValue={product.description} className="rounded-lg border border-border px-3 py-2 text-sm text-foreground" />
+                </Field>
+                <p className="col-span-2 text-[11px] text-muted-foreground">
+                  Changes apply from now on. Past sales, receipts and batch costs keep the values recorded at the time.
+                </p>
+                <div className="col-span-2 flex gap-2">
+                  <Button type="button" variant="outline" size="sm" className="flex-1" onClick={() => setEditing(false)}>Cancel</Button>
+                  <Button type="submit" size="sm" className="flex-1" disabled={busy}>{busy ? "Saving…" : "Save medicine"}</Button>
+                </div>
+              </form>
+            </Section>
+          )}
 
           {product.status !== "healthy" && (
             <div className="rounded-xl border border-warning/30 bg-warning/10 p-4">
@@ -242,81 +374,21 @@ export function MedicineDrawer({
           )}
 
           <Section title="Pricing" icon={TrendingUp}>
-            {editing && can("inventory.update") && !isArchived ? (
-              <form
-                className="grid grid-cols-2 gap-2 rounded-xl border border-border bg-background p-3"
-                onSubmit={async (e) => {
-                  e.preventDefault()
-                  const fd = new FormData(e.currentTarget)
-                  setBusy(true)
-                  setError(null)
-                  try {
-                    const next = await api<Product>(`/products/${product.id}`, {
-                      method: "PATCH",
-                      body: JSON.stringify({
-                        name: fd.get("name"),
-                        sku: String(fd.get("sku") || "").trim() || null,
-                        barcode: String(fd.get("barcode") || "").trim() || null,
-                        category: String(fd.get("category") || "").trim() || "General",
-                        selling_price: fd.get("selling_price"),
-                        cost_price: fd.get("cost_price"),
-                        reorder_threshold: Number(fd.get("reorder_threshold")),
-                      }),
-                    })
-                    setProduct(next)
-                    setEditing(false)
-                    onChanged?.()
-                  } catch (err) {
-                    setError(err instanceof ApiError ? err.message : "Update failed")
-                  } finally {
-                    setBusy(false)
-                  }
-                }}
-              >
-                <label className="col-span-2 flex flex-col gap-1 text-xs text-muted-foreground">
-                  Medicine name *
-                  <input name="name" required maxLength={200} defaultValue={product.name} className="h-9 rounded-lg border border-border px-3 text-sm text-foreground" />
-                </label>
-                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                  Cost price *
-                  <input name="cost_price" required type="number" min={0} step="any" defaultValue={String(product.cost_price)} className="h-9 rounded-lg border border-border px-3 text-sm text-foreground" />
-                </label>
-                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                  Selling price *
-                  <input name="selling_price" required type="number" min={0} step="any" defaultValue={String(product.selling_price)} className="h-9 rounded-lg border border-border px-3 text-sm text-foreground" />
-                </label>
-                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                  Reorder point *
-                  <input name="reorder_threshold" required type="number" min={0} step={1} defaultValue={product.reorder_threshold} className="h-9 rounded-lg border border-border px-3 text-sm text-foreground" />
-                </label>
-                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                  Category (optional)
-                  <input name="category" defaultValue={product.category} placeholder="General" className="h-9 rounded-lg border border-border px-3 text-sm text-foreground" />
-                </label>
-                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                  SKU (optional)
-                  <input name="sku" defaultValue={product.sku} className="h-9 rounded-lg border border-border px-3 text-sm text-foreground" />
-                </label>
-                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                  Barcode (optional)
-                  <input name="barcode" defaultValue={product.barcode} className="h-9 rounded-lg border border-border px-3 text-sm text-foreground" />
-                </label>
-                <div className="col-span-2 flex gap-2">
-                  <Button type="button" variant="outline" size="sm" className="flex-1" onClick={() => setEditing(false)}>Cancel</Button>
-                  <Button type="submit" size="sm" className="flex-1" disabled={busy}>{busy ? "Saving…" : "Save product"}</Button>
-                </div>
-              </form>
-            ) : (
-              <div className="rounded-xl border border-border bg-background p-4">
-                <div className="flex items-baseline justify-between">
-                  <p className="text-2xl font-semibold">{currency(Number(product.selling_price))}<span className="ml-1 text-xs font-normal text-muted-foreground">/ unit</span></p>
-                  <Badge variant="success">{margin}% margin</Badge>
-                </div>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  Cost {currency(Number(product.cost_price))} · SKU {product.sku || "—"} · Barcode {product.barcode || "—"}
-                </p>
+            <div className="rounded-xl border border-border bg-background p-4">
+              <div className="flex items-baseline justify-between">
+                <p className="text-2xl font-semibold">{currency(Number(product.selling_price))}<span className="ml-1 text-xs font-normal text-muted-foreground">/ unit</span></p>
+                <Badge variant="success">{margin}% margin</Badge>
               </div>
-            )}
+              <p className="mt-2 text-xs text-muted-foreground">
+                Cost {currency(Number(product.cost_price))} · SKU {product.sku || "—"} · Barcode {product.barcode || "—"}
+              </p>
+              {(product.generic_name || product.dosage_form || product.strength) && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {[product.generic_name, product.strength, product.dosage_form].filter(Boolean).join(" · ")}
+                  {product.unit ? ` · per ${product.unit}` : ""}
+                </p>
+              )}
+            </div>
           </Section>
 
           <Section title="Batches" icon={CalendarClock}>
@@ -347,6 +419,34 @@ export function MedicineDrawer({
                       <p className="mt-1.5 text-[11px] text-muted-foreground/90">
                         Batch {b.batch_number} received through {poLabel} from {b.supplier.name}
                       </p>
+                    )}
+                    {canEditBatch && editingBatch !== b.id && (
+                      <div className="mt-2 flex justify-end">
+                        <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={() => { setEditingBatch(b.id); setNotice(null) }}>
+                          <CalendarClock className="size-3.5" /> Edit expiry
+                        </Button>
+                      </div>
+                    )}
+                    {canEditBatch && editingBatch === b.id && (
+                      <form className="mt-3 grid grid-cols-2 gap-2 border-t border-border pt-3" onSubmit={(e) => void saveBatchExpiry(e, b.id, b.batch_number)}>
+                        <p className="col-span-2 text-xs text-muted-foreground">
+                          Correct the expiry for batch <span className="font-mono">{b.batch_number}</span> ({b.quantity} units left).
+                          Current: {formatExpiry(b.expiry_date, { day: "numeric", month: "long", year: "numeric" })}.
+                        </p>
+                        <Field label="New expiry date *">
+                          <input name="expiry_date" type="date" required min="2000-01-01" max="2099-12-31" defaultValue={b.expiry_date.slice(0, 10)} className={fieldCls} />
+                        </Field>
+                        <Field label="Reason *">
+                          <input name="reason" required maxLength={255} placeholder="e.g. Typo at receiving" className={fieldCls} />
+                        </Field>
+                        <p className="col-span-2 text-[11px] text-muted-foreground">
+                          Stock selection (FEFO), expiry alerts and reports use the new date. The change is recorded in the audit log.
+                        </p>
+                        <div className="col-span-2 flex gap-2">
+                          <Button type="button" variant="outline" size="sm" className="flex-1" onClick={() => setEditingBatch(null)}>Cancel</Button>
+                          <Button type="submit" size="sm" className="flex-1" disabled={busy}>{busy ? "Saving…" : "Save expiry"}</Button>
+                        </div>
+                      </form>
                     )}
                   </div>
                 )
@@ -450,7 +550,7 @@ export function MedicineDrawer({
           ) : (
             <>
               {can("inventory.update") ? (
-                <Button variant="outline" className="flex-1 gap-1.5" onClick={() => setEditing((v) => !v)}><Pencil className="size-4" /> {editing ? "Cancel edit" : "Edit"}</Button>
+                <Button variant="outline" className="flex-1 gap-1.5" onClick={() => { setEditing((v) => !v); setNotice(null) }}><Pencil className="size-4" /> {editing ? "Cancel edit" : "Edit medicine"}</Button>
               ) : (
                 <Button variant="outline" className="flex-1" onClick={onClose}>Close</Button>
               )}
@@ -465,6 +565,17 @@ export function MedicineDrawer({
         </div>
       </div>
     </Overlay>
+  )
+}
+
+const fieldCls = "h-9 rounded-lg border border-border px-3 text-sm text-foreground"
+
+function Field({ label, className, children }: { label: string; className?: string; children: React.ReactNode }) {
+  return (
+    <label className={cn("flex flex-col gap-1 text-xs text-muted-foreground", className)}>
+      {label}
+      {children}
+    </label>
   )
 }
 
